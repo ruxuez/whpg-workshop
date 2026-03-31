@@ -1,0 +1,71 @@
+services:
+  whpg_cdw:
+    build:
+      context: .
+      secrets:
+        - repo_token
+    image: whpg_cdw
+    platform: linux/amd64
+    container_name: cdw
+    hostname: cdw
+    tty: true
+    networks:
+      - converged-analytics-network
+    ports:
+      - "5432:5432"
+    volumes:
+      - master:/data/master
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /gpinitsystem_complete && pg_isready -U gpadmin -d template1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+
+  whpg_seg1:
+    image: whpg_cdw
+    depends_on:
+      - whpg_cdw
+    container_name: sdw1
+    hostname: sdw1
+    tty: true
+    platform: linux/amd64
+    networks:
+      - converged-analytics-network
+    volumes:
+      - sdw1_primary1:/data1/primary
+      - sdw1_primary2:/data2/primary
+
+  whpg_seg2:
+    image: whpg_cdw
+    depends_on:
+      - whpg_cdw
+    container_name: sdw2
+    hostname: sdw2
+    tty: true
+    platform: linux/amd64
+    networks:
+      - converged-analytics-network
+    volumes:
+      - sdw2_primary1:/data1/primary
+      - sdw2_primary2:/data2/primary
+
+volumes:
+  master:
+  sdw1_primary1:
+  sdw1_primary2:
+  sdw1_mirror1:
+  sdw1_mirror2:
+  sdw2_primary1:
+  sdw2_primary2:
+  sdw2_mirror1:
+  sdw2_mirror2:
+
+networks:
+  converged-analytics-network:
+    name: converged-analytics-network
+
+secrets:
+  repo_token:
+    environment: EDB_SUBSCRIPTION_TOKEN
+
