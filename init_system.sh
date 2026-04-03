@@ -99,6 +99,12 @@ EOF
      psql -P pager=off -d template1 -c "SHOW optimizer"
 
      echo ""
+     echo "Installing PGVECTOR..."
+
+     # Step 1: Create extension VECTOR
+     psql -d demo -c 'CREATE EXTENSION IF NOT EXISTS vector CASCADE'
+
+     echo ""
      echo "Configuring PGAA and PGFS..."
 
      # Step 1: Add PGAA and PGFS to shared_preload_libraries and restart
@@ -121,6 +127,19 @@ EOF
      echo ""
      echo "Installed Extensions:"
      psql -P pager=off -d demo -c '\dx'
+
+     echo ""
+     echo "Configuring MADLIB..."
+
+     # Step 1: Install 
+     /usr/local/madlib/bin/madpack -s madlib -p greenplum -c gpadmin@localhost:5432/demo install
+
+     # Step 2: Check install
+     # /usr/local/madlib/bin/madpack -s madlib -p greenplum -c gpadmin@localhost:5432/demo install-check
+
+     echo ""
+     echo "Schemas:"
+     psql -P pager=off -d demo -c '\dn'
 
      sudo touch /gpinitsystem_complete
 fi

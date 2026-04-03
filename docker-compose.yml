@@ -1,4 +1,47 @@
 services:
+  # ─── MinIO (S3-compatible store for Apache Iceberg / PGAA) ───────────────────
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    networks:
+      - converged-analytics-network
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+
+  # ─── MinIO bucket initialisation (one-shot) ───────────────────────────────────
+  createbuckets:
+    image: minio/mc:latest
+    container_name: minio-createbuckets
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - converged-analytics-network
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        mc alias set local http://minio:9000 minioadmin minioadmin
+        echo "MinIO is ready, creating bucket..."
+        mc mb local/warehouse --ignore-existing
+        echo "Bucket created successfully"
+        exit 0
+
+# ─── WHPG Cluster: 1 Coordinator + 2 Segments ───────────────────────────────────
   whpg_cdw:
     build:
       context: .
@@ -54,12 +97,9 @@ volumes:
   master:
   sdw1_primary1:
   sdw1_primary2:
-  sdw1_mirror1:
-  sdw1_mirror2:
   sdw2_primary1:
   sdw2_primary2:
-  sdw2_mirror1:
-  sdw2_mirror2:
+  minio-data:   # /data   — MinIO object storage
 
 networks:
   converged-analytics-network:
@@ -68,4 +108,3 @@ networks:
 secrets:
   repo_token:
     environment: EDB_SUBSCRIPTION_TOKEN
-

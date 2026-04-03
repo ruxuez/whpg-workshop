@@ -50,15 +50,19 @@ RUN echo root:changeme@123 | chpasswd && \
   python3-pyyaml \
   clang \
   llvm \
-  llvm-libs
+  llvm-libs \
+  m4
+
+  RUN --mount=type=secret,id=repo_token bash -c 'ls /run/secrets && curl -1Lf https://downloads.enterprisedb.com/$(cat /run/secrets/repo_token)/gpsupp/setup.rpm.sh | sudo bash'
+  RUN dnf -y install \
+    warehouse-pg-7 \
+    edb-whpg7-pgfs \
+    edb-whpg7-pgvector \
+    edb-whpg7-madlib
 
 RUN --mount=type=secret,id=repo_token bash -c 'ls /run/secrets && curl -1Lf https://downloads.enterprisedb.com/$(cat /run/secrets/repo_token)/dev/setup.rpm.sh | sudo bash'
 RUN dnf -y install \
-  warehouse-pg-7 \
-  edb-whpg7-pgfs \
-  edb-whpg7-pgaa \
-  edb-whpg7-pgvector \
-  edb-whpg7-madlib
+  edb-whpg7-pgaa
 
 COPY gpinitsystem_config /tmp/
 COPY hostfile_gpinitsystem /tmp/
