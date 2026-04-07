@@ -152,15 +152,6 @@ EOF
 
      sudo python3 -m pip install flask
 
-
-     echo ""
-     echo "Generating data for Lab1 Network..."
-
-     psql -h localhost -p 5432 -U gpadmin -d lab1 /scripts/sql/01_schema.sql
-     psql -h localhost -p 5432 -U gpadmin -d lab1 /scripts/sql/02_seed_reference.sql
-     psql -h localhost -p 5432 -U gpadmin -d lab1 /scripts/sql/03_seed_traffic.sql
-
-
      sudo touch /gpinitsystem_complete
 fi
 
