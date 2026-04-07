@@ -72,6 +72,9 @@ export MASTER_DATA_DIRECTORY=/data/master/gpseg-1
                  --max_connections=100
 
     printf "sdw1\nsdw2\n" >> /tmp/gpdb-hosts
+    createdb lab1
+     createdb lab2
+     createdb lab3
 
 if [ $HOSTNAME == "cdw" ]; then
      ## Allow any host access the WarehousePG Cluster
@@ -140,6 +143,17 @@ EOF
      echo ""
      echo "Schemas:"
      psql -P pager=off -d demo -c '\dn'
+
+     echo ""
+     echo "Installing Python dependencies..."
+     
+     # Ensure pip is up to date
+     sudo python3 -m pip install --upgrade pip
+
+     if [ -f /scripts/requirements.txt ]; then
+         echo "Installing from requirements.txt..."
+         sudo python3 -m pip install -r /scripts/requirements.txt
+     fi     
 
      sudo touch /gpinitsystem_complete
 fi
