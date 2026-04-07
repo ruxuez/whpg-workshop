@@ -150,18 +150,15 @@ EOF
      # Ensure pip is up to date
      sudo python3 -m pip install --upgrade pip
 
-     if [ -f /scripts/requirements.txt ]; then
-         echo "Installing from requirements.txt..."
-         sudo python3 -m pip install -r /scripts/requirements.txt
-     fi     
+     sudo python3 -m pip install flask
 
 
      echo ""
      echo "Generating data for Lab1 Network..."
-     
-     psql lab1 /scripts/sql/01_schema.sql
-     psql lab1 /scripts/sql/02_seed_reference.sql
-     psql lab1 /scripts/sql/03_seed_traffic.sql
+
+     psql -h localhost -p 5432 -U gpadmin -d lab1 /scripts/sql/01_schema.sql
+     psql -h localhost -p 5432 -U gpadmin -d lab1 /scripts/sql/02_seed_reference.sql
+     psql -h localhost -p 5432 -U gpadmin -d lab1 /scripts/sql/03_seed_traffic.sql
 
 
      sudo touch /gpinitsystem_complete
