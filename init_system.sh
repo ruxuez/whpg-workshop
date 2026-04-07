@@ -155,6 +155,15 @@ EOF
          sudo python3 -m pip install -r /scripts/requirements.txt
      fi     
 
+
+     echo ""
+     echo "Generating data for Lab1 Network..."
+     
+     psql lab1 /scripts/sql/01_schema.sql
+     psql lab1 /scripts/sql/02_seed_reference.sql
+     psql lab1 /scripts/sql/03_seed_traffic.sql
+
+
      sudo touch /gpinitsystem_complete
 fi
 
