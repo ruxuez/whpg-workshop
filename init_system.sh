@@ -139,9 +139,9 @@ echo ""
 echo "Installing Python dependencies..."
 
 # Ensure pip is up to date
-sudo python3 -m pip install --upgrade pip
+python3 -m pip install --upgrade pip
 
-sudo python3 -m pip install flask
+python3 -m pip install flask
 
 
 touch /data/master/gpinitsystem_complete
