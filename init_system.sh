@@ -1,161 +1,152 @@
 #!/bin/bash
 ## ======================================================================
-## Container initialization script
+## Container initialization script (runs as a systemd oneshot service)
 ## ======================================================================
-
-# ----------------------------------------------------------------------
-# Start SSH daemon and setup for SSH access
-# ----------------------------------------------------------------------
-# The SSH daemon is started to allow remote access to the container via
-# SSH. This is useful for development and debugging purposes. If the SSH
-# daemon fails to start, the script exits with an error.
-# ----------------------------------------------------------------------
-if ! sudo /usr/sbin/sshd; then
-    echo "Failed to start SSH daemon" >&2
-    exit 1
-fi
-
-sudo ln -sf /usr/bin/python2.7 /usr/bin/python
-
-# ----------------------------------------------------------------------
-# Remove /run/nologin to allow logins
-# ----------------------------------------------------------------------
-# The /run/nologin file, if present, prevents users from logging into
-# the system. This file is removed to ensure that users can log in via SSH.
-# ----------------------------------------------------------------------
-sudo rm -rf /run/nologin
-
-# ## Change ownership to gpadmin
-sudo chown -R gpadmin.gpadmin /usr/local/greenplum-db \
-                              /tmp/gpinitsystem_config \
-                              /tmp/hostfile_gpinitsystem \
-                              /tmp/gpdb-hosts
-
-if [ $HOSTNAME == "cdw" ]; then
-  sudo chown -R gpadmin.gpadmin /data
-else
-  sudo chown -R gpadmin.gpadmin /data1
-  sudo chown -R gpadmin.gpadmin /data2
-fi
-
-# ----------------------------------------------------------------------
-# Configure passwordless SSH access for 'gpadmin' user
-# ----------------------------------------------------------------------
-# The script sets up SSH key-based authentication for the 'gpadmin' user,
-# allowing passwordless SSH access. It generates a new SSH key pair if one
-# does not already exist, and configures the necessary permissions.
-# ----------------------------------------------------------------------
-mkdir -p /home/gpadmin/.ssh
-chmod 700 /home/gpadmin/.ssh
-
-if [ ! -f /home/gpadmin/.ssh/id_rsa ]; then
-    ssh-keygen -t rsa -b 4096 -C gpadmin -f /home/gpadmin/.ssh/id_rsa -P "" > /dev/null 2>&1
-fi
-
-cat /home/gpadmin/.ssh/id_rsa.pub >> /home/gpadmin/.ssh/authorized_keys
-chmod 600 /home/gpadmin/.ssh/authorized_keys
-
-# Add the container's hostname to the known_hosts file to avoid SSH warnings
-ssh-keyscan -t rsa cdw > /home/gpadmin/.ssh/known_hosts 2>/dev/null
+## Root-level prep (chown, symlinks) is handled by init_root.sh via
+## ExecStartPre — this script runs entirely as gpadmin, no sudo needed.
+set -e
 
 # Source environment variables and set MASTER_DATA_DIRECTORY
 source /usr/local/greenplum-db/greenplum_path.sh
 export MASTER_DATA_DIRECTORY=/data/master/gpseg-1
 
-#Initialize multi node WarehousePG cluster
+# Segments only need sshd running — the coordinator handles all init via SSH.
+# Exit early on segment hosts to avoid running gpinitsystem concurrently
+# with the coordinator (which would cause race conditions on data dirs).
+if [ "$HOSTNAME" != "cdw" ]; then
+  echo "Segment host $HOSTNAME ready (sshd running, waiting for coordinator)"
+  exit 0
+fi
 
-    sshpass -p "changeme@123" ssh-copy-id -o StrictHostKeyChecking=no sdw1
-    sshpass -p "changeme@123" ssh-copy-id -o StrictHostKeyChecking=no sdw2
-    gpinitsystem -a \
-                 -c /tmp/gpinitsystem_config \
-                 -h /tmp/hostfile_gpinitsystem \
-                 --max_connections=100
+# --- Everything below runs only on the coordinator (cdw) ---
 
-    printf "sdw1\nsdw2\n" >> /tmp/gpdb-hosts
-    createdb lab1
-     createdb lab2
-     createdb lab3
+# Wait for segment hosts to be reachable (sshd must be running).
+# In DinD, containers start slower due to nested Docker overhead.
+# Without this wait, ssh-copy-id hangs indefinitely if sshd isn't up yet.
+echo "DNS resolver: $(cat /etc/resolv.conf | grep nameserver || echo 'none')"
+for host in sdw1 sdw2; do
+  echo "Waiting for $host sshd..."
+  for i in $(seq 1 60); do
+    ssh -o ConnectTimeout=2 -o StrictHostKeyChecking=no "$host" true 2>/dev/null && break
+    sleep 2
+  done
+  if ! ssh -o ConnectTimeout=2 -o StrictHostKeyChecking=no "$host" true; then
+    echo "ERROR: $host not reachable after 120s"
+    echo "=== Diagnostics ==="
+    echo "resolv.conf:"; cat /etc/resolv.conf
+    echo "getent hosts $host:"; getent hosts "$host" 2>&1 || echo "getent failed"
+    echo "ping $host:"; ping -c1 -W2 "$host" 2>&1 || echo "ping failed"
+    echo "ssh verbose:"; ssh -v -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$host" true 2>&1 || true
+    exit 1
+  fi
+  echo "  ✓ $host reachable"
+done
 
-if [ $HOSTNAME == "cdw" ]; then
-     ## Allow any host access the WarehousePG Cluster
-     echo 'host all all 0.0.0.0/0 trust' >> /data/master/gpseg-1/pg_hba.conf
-     gpstop -u
+# Populate known_hosts now that segments are reachable
+ssh-keyscan -t rsa cdw sdw1 sdw2 > /home/gpadmin/.ssh/known_hosts 2>/dev/null
 
-     psql -d template1 \
-          -c "ALTER USER gpadmin PASSWORD 'changeme@123'"
+# Initialize multi node WarehousePG cluster
+gpinitsystem -a \
+             -c /tmp/gpinitsystem_config \
+             -h /tmp/hostfile_gpinitsystem \
+             --max_connections=100
 
-     cat <<-'EOF'
+printf "sdw1\nsdw2\n" >> /tmp/gpdb-hosts
+createdb lab1
+createdb lab2
+createdb lab3
+
+# Allow any host to access the WarehousePG Cluster — coordinator AND all segments.
+# Without this on segments, gprecoverseg fails with "no pg_hba.conf entry" errors
+# because it connects to segment Postgres instances from the coordinator's IP.
+echo 'host all all 0.0.0.0/0 trust' >> /data/master/gpseg-1/pg_hba.conf
+for dir in /data1/primary/gpseg*/pg_hba.conf /data2/primary/gpseg*/pg_hba.conf \
+           /data1/mirror/gpseg*/pg_hba.conf /data2/mirror/gpseg*/pg_hba.conf; do
+  [ -f "$dir" ] && echo 'host all all 0.0.0.0/0 trust' >> "$dir"
+done
+# Also apply to segment hosts via SSH
+for host in sdw1 sdw2; do
+  ssh -o StrictHostKeyChecking=no "$host" bash -c '"
+    for f in /data1/primary/gpseg*/pg_hba.conf /data2/primary/gpseg*/pg_hba.conf \
+             /data1/mirror/gpseg*/pg_hba.conf /data2/mirror/gpseg*/pg_hba.conf; do
+      [ -f \"\$f\" ] && echo \"host all all 0.0.0.0/0 trust\" >> \"\$f\"
+    done
+  "' || echo "WARNING: Could not update pg_hba on $host"
+done
+gpstop -u
+
+psql -d template1 -c "ALTER USER gpadmin PASSWORD 'changeme@123'"
+
+cat <<-'EOF'
 
 ======================================================================
-Demo: WarehousePG with PGAA Database Cluster details
+Sandbox: WarehousePG Database Cluster details
 ======================================================================
 
 EOF
 
-     echo "Current time: $(date)"
-     source /etc/os-release
-     echo "OS Version: ${NAME} ${VERSION}"
+echo "Current time: $(date)"
+source /etc/os-release
+echo "OS Version: ${NAME} ${VERSION}"
 
-     ## Set gpadmin password, display version and cluster configuration
-     psql -P pager=off -d template1 -c "SELECT VERSION()"
-     psql -P pager=off -d template1 -c "SELECT * FROM gp_segment_configuration ORDER BY dbid"
-     psql -P pager=off -d template1 -c "SHOW optimizer"
+# Display version and cluster configuration
+psql -P pager=off -d template1 -c "SELECT VERSION()"
+psql -P pager=off -d template1 -c "SELECT * FROM gp_segment_configuration ORDER BY dbid"
+psql -P pager=off -d template1 -c "SHOW optimizer"
 
-     echo ""
-     echo "Installing PGVECTOR..."
+# Configure PGAA: two-phase restart required.
+# Phase 1: Add PGAA to shared_preload_libraries so hooks register.
+gpconfig -c shared_preload_libraries -v pgaa
+gpstop -a -M fast -r
 
-     # Step 1: Create extension VECTOR
-     psql -d demo -c 'CREATE EXTENSION IF NOT EXISTS vector CASCADE'
+# Phase 2: Now that PGAA hooks are loaded, set PGAA GUCs.
+# These GUCs are sighup-reloadable — use gpstop -u (reload) instead of
+# full restart to save ~25s on cold boot.
+gpconfig -c pgaa.enable_maintenance_worker -v true
+gpconfig -c pgaa.maintenance_worker_sleep_interval -v 1s
+psql demo -c 'CREATE EXTENSION IF NOT EXISTS PGAA CASCADE'
+gpstop -u
 
-     echo ""
-     echo "Configuring PGAA and PGFS..."
+# Verify PGAA setup
+echo ""
+echo "PGAA Version:"
+psql -P pager=off -d demo -c 'SELECT pgaa.pgaa_version()'
 
-     # Step 1: Add PGAA and PGFS to shared_preload_libraries and restart
-     gpconfig -c shared_preload_libraries -v 'pgaa,pgfs'
-     gpstop -a -M fast -r
+echo ""
+echo "Installed Extensions:"
+psql -P pager=off -d demo -c '\dx'
 
-     # Step 2: Enable Seafowl (Datafusion) engine and restart
-     gpconfig -c pgaa.autostart_seafowl -v on
-     gpstop -a -M fast -r
+echo ""
+echo "Installing PGVECTOR..."
 
-     # Step 3: Create extensions
-     psql -d demo -c 'CREATE EXTENSION IF NOT EXISTS pgaa CASCADE'
-     psql -d demo -c 'CREATE EXTENSION IF NOT EXISTS pgfs CASCADE'
+# Step 1: Create extension VECTOR
+psql -d demo -c 'CREATE EXTENSION IF NOT EXISTS vector CASCADE'
 
-     # Verify PGAA setup
-     echo ""
-     echo "PGAA Version:"
-     psql -P pager=off -d demo -c 'SELECT pgaa.pgaa_version()'
+echo ""
+echo "Configuring MADLIB..."
 
-     echo ""
-     echo "Installed Extensions:"
-     psql -P pager=off -d demo -c '\dx'
+# Step 1: Install 
+/usr/local/madlib/bin/madpack -s madlib -p greenplum -c gpadmin@localhost:5432/demo install
 
-     echo ""
-     echo "Configuring MADLIB..."
+# Step 2: Check install
+# /usr/local/madlib/bin/madpack -s madlib -p greenplum -c gpadmin@localhost:5432/demo install-check
 
-     # Step 1: Install 
-     /usr/local/madlib/bin/madpack -s madlib -p greenplum -c gpadmin@localhost:5432/demo install
+echo ""
+echo "Schemas:"
+psql -P pager=off -d demo -c '\dn'
 
-     # Step 2: Check install
-     # /usr/local/madlib/bin/madpack -s madlib -p greenplum -c gpadmin@localhost:5432/demo install-check
+echo ""
+echo "Installing Python dependencies..."
 
-     echo ""
-     echo "Schemas:"
-     psql -P pager=off -d demo -c '\dn'
+# Ensure pip is up to date
+sudo python3 -m pip install --upgrade pip
 
-     echo ""
-     echo "Installing Python dependencies..."
-     
-     # Ensure pip is up to date
-     sudo python3 -m pip install --upgrade pip
+sudo python3 -m pip install flask
 
-     sudo python3 -m pip install flask
 
-     sudo touch /gpinitsystem_complete
-fi
+touch /data/master/gpinitsystem_complete
 
-echo '
+echo "
 ===========================
 =  DEPLOYMENT SUCCESSFUL  =
 ===========================
@@ -165,17 +156,8 @@ echo '
  __          __            _                          _____   _____
  \ \        / /           | |                        |  __ \ / ____|
   \ \  /\  / /_ _ _ __ ___| |__   ___  _   _ ___  ___| |__) | |  __
-   \ \/  \/ / _` | '__/ _ \ '_ \ / _ \| | | / __|/ _ \  ___/| | |_ |
+   \ \/  \/ / _\` | '__/ _ \ '_ \ / _ \| | | / __|/ _ \  ___/| | |_ |
     \  /\  / (_| | | |  __/ | | | (_) | |_| \__ \  __/ |    | |__| |
      \/  \/ \__,_|_|  \___|_| |_|\___/ \__,_|___/\___|_|     \_____|
 
-======================================================================'
-
-# ----------------------------------------------------------------------
-# Start an interactive bash shell
-# ----------------------------------------------------------------------
-# Finally, the script starts an interactive bash shell to keep the
-# container running and allow the user to interact with the environment.
-# ----------------------------------------------------------------------
-/bin/bash
-
+======================================================================"

@@ -52,6 +52,10 @@ services:
     container_name: cdw
     hostname: cdw
     tty: true
+    privileged: true
+    tmpfs:
+      - /run
+      - /run/lock
     networks:
       - converged-analytics-network
     ports:
@@ -64,7 +68,7 @@ services:
       - master:/data/master
       - ./scripts:/scripts:ro
     healthcheck:
-      test: ["CMD-SHELL", "test -f /gpinitsystem_complete && pg_isready -U gpadmin -d template1"]
+      test: ["CMD-SHELL", "test -f /data/master/gpinitsystem_complete &&  su - gpadmin -c \"psql -d template1 -c 'SELECT 1'\""]
       interval: 10s
       timeout: 5s
       retries: 30
@@ -73,31 +77,53 @@ services:
   whpg_seg1:
     image: whpg_cdw
     depends_on:
-      - whpg_cdw
+      whpg_cdw:
+        condition: service_started
     container_name: sdw1
     hostname: sdw1
     tty: true
+    privileged: true
+    tmpfs:
+      - /run
+      - /run/lock
     platform: linux/amd64
     networks:
       - converged-analytics-network
     volumes:
       - sdw1_primary1:/data1/primary
       - sdw1_primary2:/data2/primary
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x postgres > /dev/null || pgrep -x sshd > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   whpg_seg2:
     image: whpg_cdw
     depends_on:
-      - whpg_cdw
+      whpg_cdw:
+        condition: service_started
     container_name: sdw2
     hostname: sdw2
     tty: true
+    privileged: true
+    tmpfs:
+      - /run
+      - /run/lock
     platform: linux/amd64
     networks:
       - converged-analytics-network
     volumes:
       - sdw2_primary1:/data1/primary
       - sdw2_primary2:/data2/primary
-
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -x postgres > /dev/null || pgrep -x sshd > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      
 volumes:
   master:
   sdw1_primary1:

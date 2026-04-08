@@ -15,9 +15,9 @@ SELECT pgfs.delete_storage_location('minio_iceberg');
 
 SELECT pgfs.create_storage_location(
     name        => 'minio_iceberg',
-    url         => 's3://whpg-lakehouse/iceberg',
-    options     => '{"endpoint": "http://localhost:9000", "allow_http": "true"}',
-    credentials => '{"access_key_id": "minioadmin", "secret_access_key": "minioadmin123"}'
+    url         => 's3://warehouse/iceberg',
+    options     => '{"endpoint": "http://minio:9000", "allow_http": "true"}',
+    credentials => '{"access_key_id": "minioadmin", "secret_access_key": "minioadmin"}'
 );
 
 SELECT * FROM pgfs.list_storage_locations();
