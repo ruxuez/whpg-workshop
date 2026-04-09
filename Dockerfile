@@ -164,6 +164,19 @@ RUN rm -f /etc/yum.repos.d/enterprisedb-*.repo \
 /etc/yum.repos.d/downloads_enterprisedb_com_*.repo && \
 dnf clean all
 
+# 1. Install Python 3.9 and development headers
+RUN dnf install -y python39 python39-devel python39-pip && \
+    dnf clean all
+
+# 2. Install Lab 1 & Lab 2 dependencies system-wide
+# We use the absolute path to the 3.9 binary to be 100% sure
+RUN /usr/bin/python3.9 -m pip install --upgrade pip && \
+    /usr/bin/python3.9 -m pip install \
+    flask \
+    psycopg2-binary \
+    "pyiceberg[sql-sqlite,pyiceberg-core]" && \
+    /usr/bin/python3.9 -m pip install pyarrow --only-binary=:all:
+
 # USER gpadmin
 # ENV USER=gpadmin
 # WORKDIR /home/gpadmin
