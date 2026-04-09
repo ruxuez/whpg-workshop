@@ -135,13 +135,13 @@ echo ""
 echo "Schemas:"
 psql -P pager=off -d demo -c '\dn'
 
-echo ""
-echo "Installing Python dependencies..."
+# echo ""
+# echo "Installing Python dependencies..."
 
-# Ensure pip is up to date
-sudo python3 -m pip install --upgrade pip
+# # Ensure pip is up to date
+# sudo python3 -m pip install --upgrade pip
 
-sudo python3 -m pip install flask
+# sudo python3 -m pip install flask
 
 
 touch /data/master/gpinitsystem_complete
