@@ -37,7 +37,7 @@ services:
         set -e
         mc alias set local http://minio:9000 minioadmin minioadmin
         echo "MinIO is ready, creating bucket..."
-        mc mb local/warehouse --ignore-existing
+        mc mb local/whpg-lakehouse --ignore-existing
         echo "Bucket created successfully"
         exit 0
 
@@ -123,7 +123,7 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
-      
+
 volumes:
   master:
   sdw1_primary1:
