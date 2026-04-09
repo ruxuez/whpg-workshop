@@ -97,7 +97,7 @@ RUN echo "cdw" > /tmp/gpdb-hosts && \
   echo "export MASTER_DATA_DIRECTORY=/data/master/gpseg-1" >> /home/gpadmin/.bashrc && \
   echo "export COORDINATOR_DATA_DIRECTORY=/data/master/gpseg-1" >> /home/gpadmin/.bashrc && \
   echo "source /usr/local/greenplum-db/greenplum_path.sh" >> /home/gpadmin/.bashrc && \
-  sed -i 's/^session    required     pam_limits.so/#session    required     pam_limits.so/' /etc/pam.d/sudo \
+  sed -i 's/^session    required     pam_limits.so/#session    required     pam_limits.so/' /etc/pam.d/sudo && \
   ssh-keygen -A && \
   # sshd_config uses first-match — must sed existing lines, not append
   sed -i 's/^#\?UsePAM.*/UsePAM no/' /etc/ssh/sshd_config && \
