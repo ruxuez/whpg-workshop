@@ -94,7 +94,6 @@ RUN echo "cdw" > /tmp/gpdb-hosts && \
   echo "changeme@123"| passwd --stdin gpadmin && \
   echo "gpadmin        ALL=(ALL)       NOPASSWD: ALL" >> /etc/sudoers && \
   echo "root           ALL=(ALL)       NOPASSWD: ALL" >> /etc/sudoers && \
-  sed -i 's/^Defaults    requiretty/#Defaults    requiretty/' /etc/sudoers \
   echo "export MASTER_DATA_DIRECTORY=/data/master/gpseg-1" >> /home/gpadmin/.bashrc && \
   echo "export COORDINATOR_DATA_DIRECTORY=/data/master/gpseg-1" >> /home/gpadmin/.bashrc && \
   echo "source /usr/local/greenplum-db/greenplum_path.sh" >> /home/gpadmin/.bashrc && \
