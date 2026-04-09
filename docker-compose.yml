@@ -7,6 +7,8 @@ services:
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_BROWSER_REDIRECT_URL: "https://${INSTRUQT_PARTICIPANT_ID}-9001.env.play.instruqt.com"
+      MINIO_SERVER_URL: "https://${INSTRUQT_PARTICIPANT_ID}-9000.env.play.instruqt.com"
     ports:
       - "9000:9000"
       - "9001:9001"
