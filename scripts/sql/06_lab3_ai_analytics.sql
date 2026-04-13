@@ -74,10 +74,10 @@ WHERE ts > now() - interval '24 hours'
 LIMIT 100000;   -- 100K events for the workshop
 
 -- Step 4: Create HNSW index for fast approximate nearest-neighbor search
-CREATE INDEX idx_syslog_embedding_hnsw
-ON netvista_demo.syslog_embeddings
-USING hnsw (embedding vector_cosine_ops)
-WITH (m = 16, ef_construction = 64);
+-- CREATE INDEX idx_syslog_embedding_hnsw
+-- ON netvista_demo.syslog_embeddings
+-- USING hnsw (embedding vector_cosine_ops)
+-- WITH (m = 16, ef_construction = 64);
 
 ANALYZE netvista_demo.syslog_embeddings;
 

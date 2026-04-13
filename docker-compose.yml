@@ -91,7 +91,6 @@ services:
       - converged-analytics-network
     volumes:
       - sdw1_primary1:/data1/primary
-      - sdw1_primary2:/data2/primary
     healthcheck:
       test: ["CMD-SHELL", "pgrep -x postgres > /dev/null || pgrep -x sshd > /dev/null"]
       interval: 10s
@@ -116,7 +115,6 @@ services:
       - converged-analytics-network
     volumes:
       - sdw2_primary1:/data1/primary
-      - sdw2_primary2:/data2/primary
     healthcheck:
       test: ["CMD-SHELL", "pgrep -x postgres > /dev/null || pgrep -x sshd > /dev/null"]
       interval: 10s
@@ -127,9 +125,7 @@ services:
 volumes:
   master:
   sdw1_primary1:
-  sdw1_primary2:
   sdw2_primary1:
-  sdw2_primary2:
   minio-data:   # /data   — MinIO object storage
 
 networks:

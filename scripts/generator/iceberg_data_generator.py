@@ -20,7 +20,7 @@ MinIO setup:
       minio/minio server /data --console-address ":9001"
 
     mc alias set local http://localhost:9000 minioadmin minioadmin
-    mc mb local/warehouse
+    mc mb local/whpg-lakehouse
 
 Usage:
     python3 iceberg_data_generator.py
@@ -30,7 +30,7 @@ Environment variables (all optional, defaults shown):
     MINIO_ENDPOINT=http://minio:9000
     MINIO_ACCESS_KEY=minioadmin
     MINIO_SECRET_KEY=minioadmin
-    MINIO_BUCKET=warehouse
+    MINIO_BUCKET=whpg-lakehouse
     CATALOG_DB=/home/gpadmin/iceberg_catalog.db
 """
 
@@ -456,14 +456,42 @@ UNION ALL SELECT 'events', COUNT(*) FROM events_iceberg
 ORDER BY 2 DESC;
 """
 
+def optimize_tables(catalog, table_names):
+    """
+    Manually compacts tables by reading all data and overwriting the table,
+    then expires old snapshots to clean up metadata.
+    """
+    print(f"\n[5/5] Optimizing Iceberg tables (Manual Compaction & Cleanup)...")
+    for name in table_names:
+        full_name = f"{NAMESPACE}.{name}"
+        try:
+            print(f"  Compacting {name}...")
+            table = catalog.load_table(full_name)
+            
+            # 1. Manual Compaction: Read all data into memory/Arrow and overwrite
+            # This forces Iceberg to write out new, optimized Parquet files
+            all_data = table.scan().to_arrow()
+            table.overwrite(all_data)
+            
+            # 2. Cleanup: Expire old snapshots (This IS supported in PyIceberg)
+            import time
+            now_ms = int(time.time() * 1000)
+            table.expire_snapshots(older_than_ms=now_ms, retain_last=1)
+            
+            print(f"    ✓ {name} optimized (files consolidated)")
+        except Exception as e:
+            print(f"    ✗ {name} optimization failed: {e}")
+
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═════════════════════════════════════════════════════════════════════════════
 
 def main():
     parser = argparse.ArgumentParser(description="Generate Iceberg e-commerce data on MinIO")
-    parser.add_argument("--scale", type=int, default=100,
-                        help="Scale factor (100=default, 10=10x rows)")
+    parser.add_argument("--scale", type=int, default=300,
+                        help="Scale factor (300=default, 10=10x rows)")
     args = parser.parse_args()
 
     s = args.scale
@@ -488,13 +516,13 @@ def main():
     print("=" * 70)
 
     # Connect
-    print("\n[1/4] Connecting to Iceberg catalog on MinIO...")
+    print("\n[1/5] Connecting to Iceberg catalog on MinIO...")
     catalog = get_catalog()
     ensure_namespace(catalog)
     print(f"  ✓ Ready")
 
     # Generate & write
-    print(f"\n[2/4] Generating data and writing to Iceberg...\n")
+    print(f"\n[2/5] Generating data and writing to Iceberg...\n")
     table_locations = {}
     t_start = time.perf_counter()
 
@@ -538,7 +566,7 @@ def main():
     total_time = time.perf_counter() - t_start
 
     # Verify
-    print(f"\n[3/4] Verifying tables...\n")
+    print(f"\n[3/5] Verifying tables...\n")
     for name in ["customers", "products", "orders", "order_items", "events"]:
         try:
             t = catalog.load_table(f"{NAMESPACE}.{name}")
@@ -548,7 +576,7 @@ def main():
             print(f"    {name:<15} ERROR: {e}")
 
     # Generate PGAA SQL
-    print(f"\n[4/4] Generating PGAA SQL...")
+    print(f"\n[4/5] Generating PGAA SQL...")
     sql = generate_pgaa_sql(table_locations)
     sql_path = os.path.join(os.path.dirname(CATALOG_DB) or ".", "pgaa_tables.sql")
     try:
@@ -560,11 +588,16 @@ def main():
         with open(sql_path, "w") as f:
             f.write(sql)
         print(f"  ✓ Saved to {sql_path}")
+    
+    # Optimization
+    print(f"\n[5/5] Generating PGAA SQL...")
+    table_list = ["customers", "products", "orders", "order_items", "events"]
+    optimize_tables(catalog, table_list)
 
     print(f"""
 ╔══════════════════════════════════════════════════════════════════╗
 ║  Done!                                                           ║
-║  Tables:       5 Iceberg tables on MinIO                         ║
+║  Tables:       5 Optimized Iceberg tables on MinIO               ║
 ║  Total rows:   {total:>10,}                                       ║
 ║  Time:         {total_time:>6.1f}s                                          ║
 ║                                                                  ║
