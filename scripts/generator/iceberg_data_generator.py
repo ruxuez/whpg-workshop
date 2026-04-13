@@ -59,7 +59,7 @@ from pyiceberg.transforms import DayTransform
 MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "http://minio:9000")
 MINIO_ACCESS   = os.environ.get("MINIO_ACCESS_KEY", "minioadmin")
 MINIO_SECRET   = os.environ.get("MINIO_SECRET_KEY", "minioadmin")
-MINIO_BUCKET   = os.environ.get("MINIO_BUCKET", "warehouse")
+MINIO_BUCKET   = os.environ.get("MINIO_BUCKET", "whpg-lakehouse")
 CATALOG_DB     = os.environ.get("CATALOG_DB", "/home/gpadmin/iceberg_catalog.db")
 
 WAREHOUSE = f"s3://{MINIO_BUCKET}/iceberg"
