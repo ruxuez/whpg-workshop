@@ -21,7 +21,7 @@ app = Flask(__name__)
 DB = {
     "host":     os.environ.get("WHPG_HOST", "localhost"),
     "port":     int(os.environ.get("WHPG_PORT", 5432)),
-    "dbname":   os.environ.get("WHPG_DB",   "gpadmin"),
+    "dbname":   os.environ.get("WHPG_DB",   "demo"),
     "user":     os.environ.get("WHPG_USER", "gpadmin"),
     "password": os.environ.get("WHPG_PASS", ""),
 }
