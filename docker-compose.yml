@@ -7,9 +7,9 @@ services:
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
-      MINIO_BROWSER_REDIRECT_URL: "https://cdw-9001-${_SANDBOX_ID}.env.play.instruqt.com"
-      MINIO_SERVER_URL: "https://cdw-9000-${_SANDBOX_ID}.env.play.instruqt.com"
-      MINIO_BROWSER_GZIP: "on"
+      # MINIO_BROWSER_REDIRECT_URL: "https://cdw-9001-${_SANDBOX_ID}.env.play.instruqt.com"
+      # MINIO_SERVER_URL: "https://cdw-9000-${_SANDBOX_ID}.env.play.instruqt.com"
+      # MINIO_BROWSER_GZIP: "on"
     ports:
       - "9000:9000"
       - "9001:9001"
