@@ -57,14 +57,14 @@ printf "sdw1\nsdw2\n" >> /tmp/gpdb-hosts
 # Without this on segments, gprecoverseg fails with "no pg_hba.conf entry" errors
 # because it connects to segment Postgres instances from the coordinator's IP.
 echo 'host all all 0.0.0.0/0 trust' >> /data/master/gpseg-1/pg_hba.conf
-for dir in /data1/primary/gpseg*/pg_hba.conf \
+for dir in /data1/primary/gpseg*/pg_hba.conf /data2/primary/gpseg*/pg_hba.conf\
            /data1/mirror/gpseg*/pg_hba.conf /data2/mirror/gpseg*/pg_hba.conf; do
   [ -f "$dir" ] && echo 'host all all 0.0.0.0/0 trust' >> "$dir"
 done
 # Also apply to segment hosts via SSH
 for host in sdw1 sdw2; do
   ssh -o StrictHostKeyChecking=no "$host" bash -c '"
-    for f in /data1/primary/gpseg*/pg_hba.conf \
+    for f in /data1/primary/gpseg*/pg_hba.conf /data2/primary/gpseg*/pg_hba.conf\
              /data1/mirror/gpseg*/pg_hba.conf; do
       [ -f \"\$f\" ] && echo \"host all all 0.0.0.0/0 trust\" >> \"\$f\"
     done
