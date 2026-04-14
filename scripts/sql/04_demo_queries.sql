@@ -101,7 +101,7 @@ SELECT
     SUM(bytes)                       AS total_bytes,
     COUNT(DISTINCT dst_ip)           AS unique_destinations
 FROM netflow_logs
-WHERE ts > now() - interval '1 hour'
+WHERE ts > now() - interval '6 hours'
 GROUP BY 1
 ORDER BY total_bytes DESC
 LIMIT 15;
@@ -342,7 +342,7 @@ JOIN sla_contracts sc ON c.customer_id = sc.customer_id
     AND sc.effective_to IS NULL
 JOIN regions r ON c.region_id = r.region_id
 JOIN network_metrics m ON c.customer_id = m.customer_id
-    AND m.ts > now() - interval '1 hour'
+    AND m.ts > now() - interval '6 hours'
 GROUP BY 1, 2, 3, 9, 10
 ORDER BY qoe_score ASC;
 
@@ -382,7 +382,7 @@ SELECT
     COUNT(*) FILTER (WHERE m.latency_ms > 100) AS spike_count
 FROM network_metrics m
 JOIN regions r ON m.region_id = r.region_id
-WHERE m.ts > now() - interval '1 hour'
+WHERE m.ts > now() - interval '6 hours'
 GROUP BY 1, 2
 HAVING AVG(m.latency_ms) > 30
 ORDER BY avg_latency DESC
@@ -549,7 +549,7 @@ risk_customers AS (
     FROM network_metrics m
     JOIN customers c ON m.customer_id = c.customer_id
     JOIN regions r ON c.region_id = r.region_id
-    WHERE m.ts > now() - interval '1 hour'
+    WHERE m.ts > now() - interval '6 hours'
     GROUP BY 1, 2
 ),
 hot_subnets AS (
@@ -579,3 +579,5 @@ WHERE ts.rn = 1
 ORDER BY ts.hits DESC;
 
 \timing off
+
+

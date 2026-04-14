@@ -1,22 +1,22 @@
 -- ============================================================================
--- NetVista × EDB WarehousePG — Scale-Up to ~100M Rows
+-- NetVista × EDB WarehousePG — Scale-Up to ~50M Rows
 -- ============================================================================
--- Truncates all fact tables and reloads at 3x scale.
+-- Truncates all fact tables and reloads at reduced scale.
 -- Run AFTER 01_schema.sql + 02_seed_reference.sql have been loaded.
 --
--- TARGET: ~100M total rows
---   netflow_logs     : 33,000,000  (30M base + 1.5M DDoS + 150K scan + 30K exfil)
---   dns_logs         : 25,000,000
---   firewall_logs    : 22,500,000
---   syslog_events    : 15,000,000
---   bgp_events       :  1,500,000
+-- TARGET: ~50M total rows
+--   netflow_logs     : 16,665,000  (15M base + 750K DDoS + 75K scan + 15K exfil)
+--   dns_logs         : 12,500,000
+--   firewall_logs    : 11,250,000
+--   syslog_events    :  7,500,000
+--   bgp_events       :    751,000
 --   network_metrics  :    150,000
 --   ipam_allocations :     ~2,500
 --   security_incidents:    ~3,000
---   TOTAL            : ~97,300,000
+--   TOTAL            : ~48,819,000
 --
--- ESTIMATED LOAD TIME: 5mn on 1 node (16 vcpu)
--- ESTIMATED STORAGE:   ~< 5GB compressed (zstd level 3)
+-- ESTIMATED LOAD TIME: ~2.5mn on 1 node (16 vcpu)
+-- ESTIMATED STORAGE:   ~< 3GB compressed (zstd level 3)
 -- ============================================================================
 SET search_path TO netvista_demo, public;
 SET statement_mem = '512MB';
@@ -36,21 +36,21 @@ TRUNCATE ipam_summary;
 TRUNCATE network_metrics;
 TRUNCATE security_incidents;
 
-DO $$ BEGIN RAISE NOTICE '[%] Truncate complete. Starting 100M generation...', clock_timestamp(); END $$;
+DO $$ BEGIN RAISE NOTICE '[%] Truncate complete. Starting 50M generation...', clock_timestamp(); END $$;
 
 
 -- ╔════════════════════════════════════════════════════════════════════════════╗
--- ║ NETFLOW LOGS — 30,000,000 base rows (30 batches of 1M)                 ║
+-- ║ NETFLOW LOGS — 15,000,000 base rows (15 batches of 1M)                 ║
 -- ╚════════════════════════════════════════════════════════════════════════════╝
-DO $$ BEGIN RAISE NOTICE '[%] Generating netflow_logs — 30M rows (30 batches)...', clock_timestamp(); END $$;
+DO $$ BEGIN RAISE NOTICE '[%] Generating netflow_logs — 15M rows (15 batches)...', clock_timestamp(); END $$;
 
 DO $$
 DECLARE
     batch INT;
 BEGIN
-    FOR batch IN 1..30 LOOP
-        IF batch % 5 = 0 THEN
-            RAISE NOTICE '[%] netflow batch %/30 ...', clock_timestamp(), batch;
+    FOR batch IN 1..15 LOOP
+        IF batch % 3 = 0 THEN
+            RAISE NOTICE '[%] netflow batch %/15 ...', clock_timestamp(), batch;
         END IF;
 
         INSERT INTO netflow_logs (
@@ -58,7 +58,7 @@ BEGIN
             protocol, bytes, packets, tcp_flags, flow_duration, region_id
         )
         SELECT
-            now() - (random() * interval '7 days') AS ts,
+            '2026-01-01'::timestamp + (random() * interval '113 days') AS ts,
             CASE WHEN random() < 0.15
                 THEN (ARRAY[
                     '185.220.101.34', '91.219.236.222', '45.155.205.99',
@@ -116,14 +116,14 @@ BEGIN
     END LOOP;
 END $$;
 
-DO $$ BEGIN RAISE NOTICE '[%] netflow base 30M complete.', clock_timestamp(); END $$;
+DO $$ BEGIN RAISE NOTICE '[%] netflow base 15M complete.', clock_timestamp(); END $$;
 
--- DDoS — 1.5M flows
-DO $$ BEGIN RAISE NOTICE '[%] DDoS simulation — 1.5M flows...', clock_timestamp(); END $$;
+-- DDoS — 750K flows
+DO $$ BEGIN RAISE NOTICE '[%] DDoS simulation — 750K flows...', clock_timestamp(); END $$;
 
 INSERT INTO netflow_logs (ts, src_ip, dst_ip, src_port, dst_port, protocol, bytes, packets, tcp_flags, flow_duration, region_id)
 SELECT
-    now() - interval '18 hours' + (random() * interval '2 hours'),
+    '2026-02-15'::timestamp + (random() * interval '2 hours'),
     (
         (ARRAY[31,45,62,77,89,103,118,141,156,178,185,191,203,211,223])[1 + (random()*14)::int]
         || '.' || (random()*255)::int
@@ -135,28 +135,28 @@ SELECT
     80, 6,
     (40 + (random()*80)::int)::bigint,
     1::bigint, 2, 0, 1
-FROM generate_series(1, 1500000);
+FROM generate_series(1, 750000);
 
--- Port scan — 150K flows
-DO $$ BEGIN RAISE NOTICE '[%] Port scan simulation — 150K flows...', clock_timestamp(); END $$;
+-- Port scan — 75K flows
+DO $$ BEGIN RAISE NOTICE '[%] Port scan simulation — 75K flows...', clock_timestamp(); END $$;
 
 INSERT INTO netflow_logs (ts, src_ip, dst_ip, src_port, dst_port, protocol, bytes, packets, tcp_flags, flow_duration, region_id)
 SELECT
-    now() - interval '6 hours' + (g * interval '15 milliseconds'),
+    '2026-03-10'::timestamp + (g * interval '15 milliseconds'),
     (ARRAY['45.155.205.99','198.98.56.78','222.186.42.7'])[1 + (g % 3)]::inet,
     ('10.10.1.' || (1 + (g % 254)))::inet,
     (40000 + (random()*25000)::int),
     (1 + (g % 65535)), 6,
     44::bigint, 1::bigint, 2, 0,
     CASE g % 3 WHEN 0 THEN 3 WHEN 1 THEN 1 ELSE 2 END
-FROM generate_series(1, 150000) g;
+FROM generate_series(1, 75000) g;
 
--- Exfiltration — 30K flows
-DO $$ BEGIN RAISE NOTICE '[%] Exfiltration simulation — 30K flows...', clock_timestamp(); END $$;
+-- Exfiltration — 15K flows
+DO $$ BEGIN RAISE NOTICE '[%] Exfiltration simulation — 15K flows...', clock_timestamp(); END $$;
 
 INSERT INTO netflow_logs (ts, src_ip, dst_ip, src_port, dst_port, protocol, bytes, packets, tcp_flags, flow_duration, region_id)
 SELECT
-    now() - interval '3 days' + (random() * interval '48 hours'),
+    '2026-04-01'::timestamp + (random() * interval '48 hours'),
     ('10.20.1.' || (50 + (random()*10)::int))::inet,
     (ARRAY['103.224.82.15','58.218.198.100'])[1 + (random()*1)::int]::inet,
     (40000 + (random()*25000)::int),
@@ -164,23 +164,23 @@ SELECT
     (1000000 + (random() * 50000000)::int)::bigint,
     (1000 + (random() * 50000)::int)::bigint,
     24, (30000 + (random() * 300000)::int), 1
-FROM generate_series(1, 30000);
+FROM generate_series(1, 15000);
 
-DO $$ BEGIN RAISE NOTICE '[%] netflow_logs COMPLETE (~31.68M rows).', clock_timestamp(); END $$;
+DO $$ BEGIN RAISE NOTICE '[%] netflow_logs COMPLETE (~16.84M rows).', clock_timestamp(); END $$;
 
 
 -- ╔════════════════════════════════════════════════════════════════════════════╗
--- ║ DNS LOGS — 25,000,000 rows (25 batches of 1M)                          ║
+-- ║ DNS LOGS — 12,500,000 rows (13 batches of 1M, last batch 500K)         ║
 -- ╚════════════════════════════════════════════════════════════════════════════╝
-DO $$ BEGIN RAISE NOTICE '[%] Generating dns_logs — 25M rows (25 batches)...', clock_timestamp(); END $$;
+DO $$ BEGIN RAISE NOTICE '[%] Generating dns_logs — 12.5M rows (13 batches)...', clock_timestamp(); END $$;
 
 DO $$
 DECLARE
     batch INT;
 BEGIN
-    FOR batch IN 1..25 LOOP
-        IF batch % 5 = 0 THEN
-            RAISE NOTICE '[%] dns batch %/25 ...', clock_timestamp(), batch;
+    FOR batch IN 1..13 LOOP
+        IF batch % 3 = 0 THEN
+            RAISE NOTICE '[%] dns batch %/13 ...', clock_timestamp(), batch;
         END IF;
 
         INSERT INTO dns_logs (
@@ -188,7 +188,7 @@ BEGIN
             response_code, response_ip, response_time, is_recursive, region_id
         )
         SELECT
-            now() - (random() * interval '7 days'),
+            '2026-01-01'::timestamp + (random() * interval '113 days'),
             (
                 (ARRAY['10.10','10.20','10.128','172.16','192.168','10.200','10.50','10.129','172.17','172.20'])[1 + (random()*9)::int]
                 || '.' || (random()*254+1)::int || '.' || (random()*254+1)::int
@@ -221,7 +221,7 @@ BEGIN
             END,
             random() < 0.85,
             (1 + (random()*6)::int)
-        FROM generate_series(1, 1000000);
+        FROM generate_series(1, CASE WHEN batch = 13 THEN 500000 ELSE 1000000 END);
     END LOOP;
 END $$;
 
@@ -229,17 +229,17 @@ DO $$ BEGIN RAISE NOTICE '[%] dns_logs COMPLETE.', clock_timestamp(); END $$;
 
 
 -- ╔════════════════════════════════════════════════════════════════════════════╗
--- ║ FIREWALL LOGS — 22,500,000 rows (15 batches of 1.5M)                   ║
+-- ║ FIREWALL LOGS — 11,250,000 rows (8 batches: 7×1.5M + 1×750K)          ║
 -- ╚════════════════════════════════════════════════════════════════════════════╝
-DO $$ BEGIN RAISE NOTICE '[%] Generating firewall_logs — 22.5M rows (15 batches)...', clock_timestamp(); END $$;
+DO $$ BEGIN RAISE NOTICE '[%] Generating firewall_logs — 11.25M rows (8 batches)...', clock_timestamp(); END $$;
 
 DO $$
 DECLARE
     batch INT;
 BEGIN
-    FOR batch IN 1..15 LOOP
-        IF batch % 5 = 0 THEN
-            RAISE NOTICE '[%] firewall batch %/15 ...', clock_timestamp(), batch;
+    FOR batch IN 1..8 LOOP
+        IF batch % 2 = 0 THEN
+            RAISE NOTICE '[%] firewall batch %/8 ...', clock_timestamp(), batch;
         END IF;
 
         INSERT INTO firewall_logs (
@@ -247,7 +247,7 @@ BEGIN
             protocol, action, rule_id, bytes, zone_src, zone_dst, region_id
         )
         SELECT
-            now() - (random() * interval '7 days'),
+            '2026-01-01'::timestamp + (random() * interval '113 days'),
             CASE WHEN random() < 0.3
                 THEN (
                     (1 + (random()*222)::int) || '.' || (random()*255)::int
@@ -285,7 +285,7 @@ BEGIN
             (ARRAY['external','external','internal','internal','dmz','management','transit','guest','partner'])[1 + (random()*8)::int],
             (ARRAY['internal','internal','internal','dmz','external','management','customer','database','api'])[1 + (random()*8)::int],
             (1 + (random()*6)::int)
-        FROM generate_series(1, 1500000);
+        FROM generate_series(1, CASE WHEN batch = 8 THEN 750000 ELSE 1500000 END);
     END LOOP;
 END $$;
 
@@ -293,22 +293,22 @@ DO $$ BEGIN RAISE NOTICE '[%] firewall_logs COMPLETE.', clock_timestamp(); END $
 
 
 -- ╔════════════════════════════════════════════════════════════════════════════╗
--- ║ SYSLOG EVENTS — 15,000,000 rows (15 batches of 1M)                     ║
+-- ║ SYSLOG EVENTS — 7,500,000 rows (8 batches: 7×1M + 1×500K)             ║
 -- ╚════════════════════════════════════════════════════════════════════════════╝
-DO $$ BEGIN RAISE NOTICE '[%] Generating syslog_events — 15M rows (15 batches)...', clock_timestamp(); END $$;
+DO $$ BEGIN RAISE NOTICE '[%] Generating syslog_events — 7.5M rows (8 batches)...', clock_timestamp(); END $$;
 
 DO $$
 DECLARE
     batch INT;
 BEGIN
-    FOR batch IN 1..15 LOOP
-        IF batch % 5 = 0 THEN
-            RAISE NOTICE '[%] syslog batch %/15 ...', clock_timestamp(), batch;
+    FOR batch IN 1..8 LOOP
+        IF batch % 2 = 0 THEN
+            RAISE NOTICE '[%] syslog batch %/8 ...', clock_timestamp(), batch;
         END IF;
 
         INSERT INTO syslog_events (ts, src_ip, hostname, facility, severity, program, message, region_id)
         SELECT
-            now() - (random() * interval '7 days'),
+            '2026-01-01'::timestamp + (random() * interval '113 days'),
             (
                 (ARRAY[
                     '10.10','10.20','10.128','10.129','172.16','172.17',
@@ -360,7 +360,7 @@ BEGIN
                 ELSE         'kernel: NMI watchdog: BUG: soft lockup - CPU#' || (random()*64)::int || ' stuck for ' || (22+(random()*40)::int) || 's!'
             END,
             (1 + (random()*6)::int)
-        FROM generate_series(1, 1000000);
+        FROM generate_series(1, CASE WHEN batch = 8 THEN 500000 ELSE 1000000 END);
     END LOOP;
 END $$;
 
@@ -368,20 +368,20 @@ DO $$ BEGIN RAISE NOTICE '[%] syslog_events COMPLETE.', clock_timestamp(); END $
 
 
 -- ╔════════════════════════════════════════════════════════════════════════════╗
--- ║ BGP EVENTS — 1,500,000 rows                                             ║
+-- ║ BGP EVENTS — 751,000 rows (2 batches of 375K + 1K flapping)            ║
 -- ╚════════════════════════════════════════════════════════════════════════════╝
-DO $$ BEGIN RAISE NOTICE '[%] Generating bgp_events — 1.5M rows...', clock_timestamp(); END $$;
+DO $$ BEGIN RAISE NOTICE '[%] Generating bgp_events — 751K rows...', clock_timestamp(); END $$;
 
 DO $$
 DECLARE
     batch INT;
 BEGIN
-    FOR batch IN 1..3 LOOP
-        RAISE NOTICE '[%] bgp batch %/3 ...', clock_timestamp(), batch;
+    FOR batch IN 1..2 LOOP
+        RAISE NOTICE '[%] bgp batch %/2 ...', clock_timestamp(), batch;
 
         INSERT INTO bgp_events (ts, peer_ip, prefix, event_type, as_path, next_hop, origin, local_pref, med, community, region_id)
         SELECT
-            now() - (random() * interval '7 days'),
+            '2026-01-01'::timestamp + (random() * interval '113 days'),
             ('172.' || (16 + (random()*15)::int) || '.' || (random()*255)::int || '.' || (random()*254+1)::int)::inet,
             network(
                 (
@@ -404,14 +404,14 @@ BEGIN
                 ELSE NULL
             END,
             (1 + (random()*6)::int)
-        FROM generate_series(1, 500000);
+        FROM generate_series(1, 375000);
     END LOOP;
 END $$;
 
 -- BGP flapping
 INSERT INTO bgp_events (ts, peer_ip, prefix, event_type, as_path, next_hop, origin, local_pref, med, region_id)
 SELECT
-    now() - interval '12 hours' + (g * interval '3 seconds'),
+    '2026-03-25'::timestamp + (g * interval '3 seconds'),
     '172.16.0.1'::inet, '10.20.0.0/16'::cidr,
     CASE WHEN g % 2 = 0 THEN 'WITHDRAW' ELSE 'ANNOUNCE' END,
     '2914 65001', '172.16.0.1'::inet, 'IGP', 100, 0, 3
@@ -508,7 +508,7 @@ SELECT
     ROUND((random() * 900 + 100)::numeric, 2),
     NULL
 FROM customers c
-CROSS JOIN generate_series(now() - interval '7 days', now(), interval '1 minute') AS ts;
+CROSS JOIN generate_series('2026-01-01'::timestamp, '2026-04-23 23:59:00'::timestamp, interval '1 minute') AS ts;
 
 UPDATE network_metrics
 SET mos_score = ROUND(GREATEST(1.0, LEAST(5.0,
@@ -522,7 +522,7 @@ DO $$ BEGIN RAISE NOTICE '[%] Generating security_incidents...', clock_timestamp
 
 INSERT INTO security_incidents (ts, src_ip, dst_ip, threat_category, severity, feed_id, matched_rule, description, status, region_id)
 SELECT
-    now() - (random() * interval '30 days'),
+    '2026-01-01'::timestamp + (random() * interval '113 days'),
     t.ip_single,
     (
         (ARRAY['10.10','10.20','10.128','172.16','192.168','10.200'])[1 + (random()*5)::int]
@@ -577,7 +577,7 @@ DECLARE
 BEGIN
     RAISE NOTICE '';
     RAISE NOTICE '╔══════════════════════════════════════════════════════════════╗';
-    RAISE NOTICE '║  100M SCALE DATA GENERATION COMPLETE                       ║';
+    RAISE NOTICE '║  50M SCALE DATA GENERATION COMPLETE                        ║';
     RAISE NOTICE '╠══════════════════════════════════════════════════════════════╣';
     FOR r IN
         SELECT 'netflow_logs'        AS tbl, COUNT(*) AS cnt FROM netvista_demo.netflow_logs
@@ -598,3 +598,4 @@ BEGIN
     RAISE NOTICE '║  TOTAL                         : % rows  ║', LPAD(TO_CHAR(total, '99,999,999'), 12);
     RAISE NOTICE '╚══════════════════════════════════════════════════════════════╝';
 END $$;
+

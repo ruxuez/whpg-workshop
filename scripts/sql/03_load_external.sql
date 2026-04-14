@@ -153,6 +153,10 @@ TRUNCATE network_metrics;
 -- ║  STEP 3: Load from External Tables → Native Tables                        ║
 -- ╚══════════════════════════════════════════════════════════════════════════════╝
 
+-- NOTE: Timestamps in CSV files are relative to when data_generator.py ran.
+-- We rebase them to now() so queries with time window filters always find data.
+-- The offset is: now() - max(ts) from the external table → shift all rows forward.
+
 -- ── Netflow ─────────────────────────────────────────────────────────────────
 DO $$ BEGIN RAISE NOTICE '[%] Loading netflow_logs (~33M rows)...', clock_timestamp(); END $$;
 
@@ -160,7 +164,7 @@ INSERT INTO netflow_logs (ts, src_ip, dst_ip, src_port, dst_port, protocol,
                           bytes, packets, tcp_flags, flow_duration,
                           src_as, dst_as, input_if, output_if, sampler_id, region_id)
 SELECT
-    ts,
+    ts + (now() - (SELECT MAX(ts) FROM ext_netflow_logs)),
     src_ip::inet,
     dst_ip::inet,
     src_port,
@@ -186,7 +190,7 @@ DO $$ BEGIN RAISE NOTICE '[%] Loading dns_logs (~25M rows)...', clock_timestamp(
 INSERT INTO dns_logs (ts, client_ip, query_name, query_type, response_code,
                       response_ip, response_time, is_recursive, region_id)
 SELECT
-    ts,
+    ts + (now() - (SELECT MAX(ts) FROM ext_dns_logs)),
     client_ip::inet,
     query_name,
     query_type,
@@ -205,7 +209,7 @@ DO $$ BEGIN RAISE NOTICE '[%] Loading firewall_logs (~22.5M rows)...', clock_tim
 INSERT INTO firewall_logs (ts, src_ip, dst_ip, src_port, dst_port, protocol,
                            action, rule_id, bytes, zone_src, zone_dst, region_id)
 SELECT
-    ts,
+    ts + (now() - (SELECT MAX(ts) FROM ext_firewall_logs)),
     src_ip::inet,
     dst_ip::inet,
     src_port,
@@ -227,7 +231,7 @@ DO $$ BEGIN RAISE NOTICE '[%] Loading syslog_events (~15M rows)...', clock_times
 INSERT INTO syslog_events (ts, src_ip, hostname, facility, severity,
                            program, message, region_id)
 SELECT
-    ts,
+    ts + (now() - (SELECT MAX(ts) FROM ext_syslog_events)),
     src_ip::inet,
     hostname,
     facility,
@@ -245,7 +249,7 @@ DO $$ BEGIN RAISE NOTICE '[%] Loading bgp_events (~1.5M rows)...', clock_timesta
 INSERT INTO bgp_events (ts, peer_ip, prefix, event_type, as_path,
                         next_hop, origin, local_pref, med, community, region_id)
 SELECT
-    ts,
+    ts + (now() - (SELECT MAX(ts) FROM ext_bgp_events)),
     peer_ip::inet,
     prefix::cidr,
     event_type,
@@ -267,7 +271,7 @@ INSERT INTO network_metrics (ts, customer_id, region_id, probe_ip,
                              latency_ms, jitter_ms, packet_loss_pct,
                              throughput_mbps, mos_score)
 SELECT
-    ts,
+    ts + (now() - (SELECT MAX(ts) FROM ext_network_metrics)),
     customer_id,
     region_id,
     probe_ip::inet,

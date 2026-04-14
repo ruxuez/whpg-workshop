@@ -1,673 +1,1031 @@
 #!/usr/bin/env python3
 """
-PGAA Dashboard - Compares Iceberg vs Native WHPG
-EDB Postgres AI branded UI — single-file app, no external dashboard.html needed.
-Run: python3 pgaa_dashboard_app.py
-Access: http://localhost:5000
+Lab 3 - AI-Powered Analytics: LIVE Query Dashboard
+Connects to WarehousePG (gpadmin database, port 5432)
+
+Setup:
+    pip3 install flask psycopg2-binary
+    export WHPG_HOST=localhost WHPG_PORT=5432 WHPG_DB=gpadmin WHPG_USER=gpadmin
+    python3 app2.py
+
+Open: http://localhost:5002
 """
-import psycopg2, time
-from flask import Flask, jsonify, Response
+
+import os, time, decimal, json, subprocess, threading, traceback
+from datetime import datetime, date
+from flask import Flask, render_template_string, jsonify, request
+import psycopg2, psycopg2.extras
+
 app = Flask(__name__)
-DB_CONFIG = {'host': 'localhost', 'port': 5432, 'database': 'demo', 'user': 'gpadmin', 'password': ''}
-DASHBOARD_HTML = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>PGAA Analytics Dashboard — EDB Postgres AI</title>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+
+DB = {
+    "host":     os.environ.get("WHPG_HOST", "localhost"),
+    "port":     int(os.environ.get("WHPG_PORT", 5432)),
+    "dbname":   os.environ.get("WHPG_DB",   "demo"),
+    "user":     os.environ.get("WHPG_USER", "gpadmin"),
+    "password": os.environ.get("WHPG_PASS", ""),
+}
+
+# ── Reload scripts ───────────────────────────────────────────────────────────
+# App2 (AI analytics) needs the full reload:
+#   01 schema  →  02 reference  →  03 external data  →  06 AI/pgvector
+#   →  07 K-Means assignments (MADlib if available, SQL fallback otherwise)
+WORKSHOP_DIR = os.environ.get("WORKSHOP_DIR", "/home/gpadmin/workshop")
+RELOAD_SCRIPTS = [
+    ("01_schema.sql",            "Drop & recreate schema"),
+    ("02_seed_reference.sql",    "Seed reference tables"),
+    ("03_seed_traffic.sql",      "Seed traffic data (~50M rows, Jan-Apr 2026)"),
+    ("06_ai_analytics.sql",      "Build AI / pgvector analytics"),
+    ("07_kmeans_fallback.sql",   "K-Means assignments (MADlib or SQL fallback)"),
+]
+
+# Global reload state
+_reload_lock    = threading.Lock()
+_reload_running = False
+_reload_log     = []   # list of [ts, level, msg]
+
+def _append_log(level, msg):
+    ts = datetime.now().strftime("%H:%M:%S")
+    _reload_log.append([ts, level, msg])
+
+
+# ── DB helper ────────────────────────────────────────────────────────────────
+def run(sql, params=None):
+    conn = psycopg2.connect(**DB)
+    conn.set_session(autocommit=True)
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        t0 = time.perf_counter()
+        cur.execute("SET search_path TO netvista_demo, public;")
+        cur.execute(sql, params)
+        ms = round((time.perf_counter() - t0) * 1000, 1)
+        rows = []
+        for row in cur.fetchall():
+            r = {}
+            for k, v in row.items():
+                if isinstance(v, (datetime, date)):  r[k] = v.isoformat()
+                elif isinstance(v, decimal.Decimal): r[k] = float(v)
+                elif v is None:                      r[k] = None
+                elif isinstance(v, (int, float, bool)): r[k] = v
+                else:                                r[k] = str(v)
+            rows.append(r)
+        return {"data": rows, "ms": ms, "rows": len(rows)}
+    except Exception as e:
+        return {"data": [], "ms": 0, "rows": 0, "error": str(e)}
+    finally:
+        conn.close()
+
+
+# ── Query definitions ────────────────────────────────────────────────────────
+QUERIES = [
+    # ── Panel 0: pgvector ────────────────────────────────────────────────────
+    {
+        "id": "a1", "panel": 0,
+        "name": "A1 - Similar to SYN Flood",
+        "desc": "pgvector cosine similarity search on syslog embeddings",
+        "sql": """SELECT
+    event_id, hostname, program,
+    LEFT(message, 80) AS message, severity,
+    1 - (embedding <=> (
+        SELECT embedding FROM netvista_demo.syslog_embeddings
+        WHERE message LIKE '%SYN flood%' LIMIT 1
+    )) AS similarity_score
+FROM netvista_demo.syslog_embeddings
+ORDER BY embedding <=> (
+    SELECT embedding FROM netvista_demo.syslog_embeddings
+    WHERE message LIKE '%SYN flood%' LIMIT 1
+) LIMIT 20"""
+    },
+    {
+        "id": "a2", "panel": 0,
+        "name": "A2 - Similar to Auth Failures",
+        "desc": "pgvector cosine similarity — find password/auth related events",
+        "sql": """SELECT
+    event_id, hostname, program,
+    LEFT(message, 80) AS message, severity,
+    1 - (embedding <=> (
+        SELECT embedding FROM netvista_demo.syslog_embeddings
+        WHERE message LIKE '%password%' LIMIT 1
+    )) AS similarity_score
+FROM netvista_demo.syslog_embeddings
+ORDER BY embedding <=> (
+    SELECT embedding FROM netvista_demo.syslog_embeddings
+    WHERE message LIKE '%password%' LIMIT 1
+) LIMIT 20"""
+    },
+    {
+        "id": "a3", "panel": 0,
+        "name": "A3 - Attack Pattern Clusters",
+        "desc": "Categorize events by attack pattern — aggregate counts & severity",
+        "sql": """WITH attack_patterns AS (
+    SELECT event_id, hostname, program,
+        LEFT(message, 60) AS msg, severity,
+        CASE
+            WHEN message LIKE '%SYN flood%' OR message LIKE '%flooding%' THEN 'DDoS'
+            WHEN message LIKE '%password%' OR message LIKE '%authenticating%' THEN 'Auth Failure'
+            WHEN message LIKE '%DOWN%' OR message LIKE '%Link down%' THEN 'Infra Down'
+            WHEN message LIKE '%OUT OF MEMORY%' OR message LIKE '%OOM%' THEN 'Resource Exhaustion'
+            WHEN message LIKE '%container%' OR message LIKE '%kubelet%' THEN 'Container Event'
+            WHEN message LIKE '%DNS%' OR message LIKE '%query rate%' THEN 'DNS Anomaly'
+            ELSE 'Other'
+        END AS pattern_category
+    FROM netvista_demo.syslog_embeddings
+)
+SELECT pattern_category, COUNT(*) AS event_count,
+    COUNT(DISTINCT hostname) AS affected_hosts,
+    ROUND(AVG(severity), 1) AS avg_severity
+FROM attack_patterns GROUP BY 1 ORDER BY event_count DESC"""
+    },
+
+    # ── Panel 1: MADlib / SQL ─────────────────────────────────────────────────
+    {
+        "id": "b1", "panel": 1,
+        "name": "B1 - Netflow Baseline Stats",
+        "desc": "Summary statistics for hourly IP behavior profiles",
+        "sql": """SELECT
+    COUNT(*) AS total_profiles,
+    ROUND(AVG(flow_count), 1) AS avg_flows,
+    ROUND(AVG(unique_dsts), 1) AS avg_destinations,
+    ROUND(AVG(unique_ports), 1) AS avg_ports,
+    ROUND(AVG(total_bytes)::numeric, 0) AS avg_bytes,
+    ROUND(AVG(dst_entropy)::numeric, 4) AS avg_dst_entropy,
+    ROUND(AVG(port_spread)::numeric, 4) AS avg_port_spread
+FROM netvista_demo.netflow_features"""
+    },
+    {
+        "id": "b2", "panel": 1,
+        "name": "B2 - Z-Score Anomaly Detection",
+        "desc": "Flag IPs where 2+ features exceed 3 standard deviations",
+        "sql": """WITH stats AS (
+    SELECT
+        AVG(flow_count) AS mu_flows, STDDEV_SAMP(flow_count) AS sd_flows,
+        AVG(unique_dsts) AS mu_dsts, STDDEV_SAMP(unique_dsts) AS sd_dsts,
+        AVG(unique_ports) AS mu_ports, STDDEV_SAMP(unique_ports) AS sd_ports,
+        AVG(total_bytes) AS mu_bytes, STDDEV_SAMP(total_bytes) AS sd_bytes
+    FROM netvista_demo.netflow_features
+),
+scored AS (
+    SELECT
+        f.hour, f.src_ip::text,
+        f.flow_count, f.unique_dsts, f.unique_ports, f.total_bytes,
+        ROUND(ABS(f.flow_count - s.mu_flows) / NULLIF(s.sd_flows, 0), 2) AS z_flows,
+        ROUND(ABS(f.unique_dsts - s.mu_dsts)  / NULLIF(s.sd_dsts,  0), 2) AS z_dsts,
+        ROUND(ABS(f.unique_ports - s.mu_ports) / NULLIF(s.sd_ports, 0), 2) AS z_ports,
+        ROUND(ABS(f.total_bytes - s.mu_bytes)  / NULLIF(s.sd_bytes, 0), 2) AS z_bytes
+    FROM netvista_demo.netflow_features f, stats s
+)
+SELECT hour, src_ip, flow_count, unique_dsts, unique_ports,
+    total_bytes, z_flows, z_dsts, z_ports, z_bytes,
+    (CASE WHEN z_flows > 3 THEN 1 ELSE 0 END +
+     CASE WHEN z_dsts  > 3 THEN 1 ELSE 0 END +
+     CASE WHEN z_ports > 3 THEN 1 ELSE 0 END +
+     CASE WHEN z_bytes > 3 THEN 1 ELSE 0 END) AS anomaly_dimensions
+FROM scored
+WHERE (CASE WHEN z_flows > 3 THEN 1 ELSE 0 END +
+       CASE WHEN z_dsts  > 3 THEN 1 ELSE 0 END +
+       CASE WHEN z_ports > 3 THEN 1 ELSE 0 END +
+       CASE WHEN z_bytes > 3 THEN 1 ELSE 0 END) >= 2
+ORDER BY anomaly_dimensions DESC, z_bytes DESC LIMIT 30"""
+    },
+    {
+        "id": "b3", "panel": 1,
+        "name": "B3 - MADlib K-Means Cluster Profiles",
+        "desc": "Behavioral clusters from MADlib kmeanspp (or SQL fallback) — anomalous IPs land in small/outlier clusters",
+        "sql": """SELECT
+    a.cluster_id,
+    COUNT(*) AS member_count,
+    ROUND(AVG(f.flow_count), 1) AS avg_flows,
+    ROUND(AVG(f.total_bytes)::numeric, 0) AS avg_bytes,
+    ROUND(AVG(f.unique_dsts), 1) AS avg_destinations,
+    ROUND(AVG(f.unique_ports), 1) AS avg_ports,
+    ROUND(AVG(f.dst_entropy)::numeric, 4) AS avg_entropy,
+    ROUND(AVG(f.port_spread)::numeric, 4) AS avg_port_spread
+FROM netvista_demo.kmeans_assignments a
+JOIN netvista_demo.netflow_features f ON a.src_ip = f.src_ip
+GROUP BY 1 ORDER BY member_count DESC"""
+    },
+
+    # ── Panel 2: AI Factory ───────────────────────────────────────────────────
+    {
+        "id": "c1", "panel": 2,
+        "name": "C1 - Anomaly + Syslog Correlation",
+        "desc": "The 'money query' — vector search + anomaly detection in one pass",
+        "sql": """WITH anomalous_ips AS (
+    SELECT src_ip, SUM(total_bytes) AS bytes, SUM(flow_count) AS flows
+    FROM netvista_demo.netflow_features
+    GROUP BY src_ip
+    HAVING SUM(total_bytes) > (
+        SELECT AVG(total_bytes) + 3 * STDDEV_SAMP(total_bytes)
+        FROM netvista_demo.netflow_features
+    )
+    LIMIT 10
+),
+matching_syslog AS (
+    SELECT
+        a.src_ip::text AS anomalous_ip,
+        a.bytes, a.flows,
+        se.hostname, se.program,
+        LEFT(se.message, 80) AS related_event,
+        se.severity
+    FROM anomalous_ips a
+    JOIN netvista_demo.syslog_embeddings se ON se.hostname LIKE '%' ||
+        CASE
+            WHEN a.src_ip <<= '10.128.0.0/16'::cidr THEN 'us-w'
+            WHEN a.src_ip <<= '10.10.0.0/16'::cidr  THEN 'us-e'
+            WHEN a.src_ip <<= '172.16.0.0/12'::cidr  THEN 'eu'
+            WHEN a.src_ip <<= '192.168.0.0/16'::cidr THEN 'jp'
+            WHEN a.src_ip <<= '10.200.0.0/16'::cidr  THEN 'sg'
+            ELSE 'br'
+        END || '%'
+    WHERE se.severity <= 3
+)
+SELECT * FROM matching_syslog
+ORDER BY severity, bytes DESC LIMIT 30"""
+    },
+    {
+        "id": "c2", "panel": 2,
+        "name": "C2 - Embedding Coverage",
+        "desc": "How many syslog events have embeddings — data readiness check",
+        "sql": """SELECT
+    COUNT(*) AS total_embeddings,
+    COUNT(DISTINCT hostname) AS unique_hosts,
+    COUNT(DISTINCT program) AS unique_programs,
+    ROUND(AVG(severity), 1) AS avg_severity,
+    MIN(severity) AS min_severity,
+    MAX(severity) AS max_severity
+FROM netvista_demo.syslog_embeddings"""
+    },
+    {
+        "id": "c3", "panel": 2,
+        "name": "C3 - Anomalous IP Profiles",
+        "desc": "Top anomalous source IPs by total bytes — candidates for investigation",
+        "sql": """SELECT
+    src_ip::text,
+    SUM(total_bytes) AS total_bytes,
+    SUM(flow_count) AS total_flows,
+    COUNT(*) AS hourly_windows,
+    ROUND(AVG(unique_dsts), 1) AS avg_unique_dsts,
+    ROUND(AVG(unique_ports), 1) AS avg_unique_ports,
+    ROUND(AVG(dst_entropy)::numeric, 4) AS avg_entropy
+FROM netvista_demo.netflow_features
+GROUP BY src_ip
+HAVING SUM(total_bytes) > (
+    SELECT AVG(total_bytes) + 2 * STDDEV_SAMP(total_bytes)
+    FROM netvista_demo.netflow_features
+)
+ORDER BY total_bytes DESC LIMIT 20"""
+    },
+]
+
+PANELS = [
+    {"name": "pgvector",    "icon": "A", "desc": "Semantic similarity search on network event embeddings"},
+    {"name": "MADlib / SQL","icon": "B", "desc": "Statistical anomaly detection — pure SQL, no external ML"},
+    {"name": "AI Factory",  "icon": "C", "desc": "Combined vector search + anomaly detection in one engine"},
+]
+
+
+# ── API ───────────────────────────────────────────────────────────────────────
+@app.route("/api/run", methods=["POST"])
+def api_run():
+    qid = request.json.get("id")
+    q = next((q for q in QUERIES if q["id"] == qid), None)
+    if not q:
+        return jsonify({"error": f"Unknown query: {qid}"}), 404
+    r = run(q["sql"])
+    r["id"] = qid
+    return jsonify(r)
+
+
+@app.route("/api/run_all", methods=["POST"])
+def api_run_all():
+    results = []
+    for q in QUERIES:
+        r = run(q["sql"])
+        results.append({"id": q["id"], "name": q["name"],
+                        "ms": r["ms"], "rows": r["rows"], "error": r.get("error")})
+    return jsonify({"results": results, "total_ms": round(sum(r["ms"] for r in results), 1)})
+
+
+@app.route("/api/sql", methods=["POST"])
+def api_sql():
+    sql = request.json.get("sql", "").strip()
+    if not sql:
+        return jsonify({"error": "No SQL provided"}), 400
+    w = sql.split()[0].upper() if sql.split() else ""
+    if w not in ("SELECT", "WITH", "EXPLAIN"):
+        return jsonify({"error": "Only SELECT / WITH / EXPLAIN allowed"}), 403
+    return jsonify(run(sql))
+
+
+@app.route("/api/health")
+def api_health():
+    try:
+        conn = psycopg2.connect(**DB)
+        cur = conn.cursor()
+        cur.execute("SELECT version()")
+        ver = cur.fetchone()[0]
+        conn.close()
+        return jsonify({"status": "ok", "version": ver})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+# ── Data Reload ───────────────────────────────────────────────────────────────
+@app.route("/api/reload/start", methods=["POST"])
+def api_reload_start():
+    global _reload_running, _reload_log
+    with _reload_lock:
+        if _reload_running:
+            return jsonify({"ok": False, "msg": "Reload already in progress"}), 409
+        _reload_running = True
+        _reload_log = []
+
+    def _run():
+        global _reload_running
+        try:
+            _append_log("info", f"Starting full data reload in {WORKSHOP_DIR}")
+            _append_log("info", f"Running {len(RELOAD_SCRIPTS)} scripts sequentially")
+            t_total = time.time()
+
+            for fname, label in RELOAD_SCRIPTS:
+                fpath = os.path.join(WORKSHOP_DIR, fname)
+                if not os.path.exists(fpath):
+                    _append_log("error", f"✗ Script not found: {fpath}")
+                    continue
+
+                _append_log("step", f"▶ [{label}]  psql -d {DB['dbname']} -f {fname}")
+                t0 = time.time()
+                try:
+                    proc = subprocess.Popen(
+                        ["psql", "-d", DB["dbname"], "-U", DB["user"], "-f", fpath,
+                         "-v", "ON_ERROR_STOP=0"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        cwd=WORKSHOP_DIR,
+                    )
+                    for line in proc.stdout:
+                        line = line.rstrip()
+                        if not line:
+                            continue
+                        lvl = "log"
+                        if "ERROR" in line or "FATAL" in line:
+                            lvl = "error"
+                        elif "NOTICE" in line or "WARNING" in line:
+                            lvl = "notice"
+                        elif any(line.startswith(k) for k in
+                                 ("INSERT","CREATE","DROP","ANALYZE","TRUNCATE","UPDATE","SELECT")):
+                            lvl = "ok"
+                        _append_log(lvl, line)
+                    proc.wait()
+                    elapsed = round(time.time() - t0, 1)
+                    if proc.returncode == 0:
+                        _append_log("ok", f"✓ {fname} completed in {elapsed}s")
+                    else:
+                        _append_log("error", f"✗ {fname} exited with code {proc.returncode} ({elapsed}s)")
+                except Exception as e:
+                    _append_log("error", f"✗ Failed to run {fname}: {e}")
+
+                if not _reload_running:
+                    _append_log("error", "⚠ Reload aborted — stopping before next script")
+                    break
+
+            total = round(time.time() - t_total, 1)
+            if _reload_running:
+                _append_log("done", f"🎉 Full reload complete in {total}s — ~50M rows (Jan–Apr 2026), pgvector embeddings, MADlib features & K-Means assignments ready")
+        finally:
+            _reload_running = False
+
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"ok": True, "msg": "Reload started"})
+
+
+@app.route("/api/reload/status")
+def api_reload_status():
+    return jsonify({"running": _reload_running, "log": _reload_log})
+
+
+@app.route("/api/reload/abort", methods=["POST"])
+def api_reload_abort():
+    global _reload_running
+    _reload_running = False
+    _append_log("error", "⚠ Reload aborted by user — current script may still finish")
+    return jsonify({"ok": True})
+
+
+@app.route("/")
+def index():
+    return render_template_string(
+        HTML, panels=PANELS, queries=QUERIES,
+        reload_scripts=RELOAD_SCRIPTS, workshop_dir=WORKSHOP_DIR
+    )
+
+
+# ── HTML ──────────────────────────────────────────────────────────────────────
+HTML = r"""<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lab 3 — AI Analytics | WarehousePG</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Cg transform='translate(-862,18)'%3E%3Cpath fill='%232a9993' d='M1060.7,2.12c-30.98,2.37-56.03,27.09-58.74,58.06-2.88,33.35,19.98,61.96,50.96,68.22v61.62c0,2.54-2.03,4.4-4.4,4.4h-16.76c-2.54,0-4.4-2.03-4.4-4.4v-44.35c0-7.28-5.92-13.37-13.37-13.37h-49.94c-7.28,0-13.37,5.92-13.37,13.37v44.35c0,2.54-2.03,4.4-4.4,4.4h-16.76c-2.37,0-4.4-2.03-4.4-4.4v-97.17l73.47-73.47c1.69-1.69,1.69-4.57,0-6.26l-11.85-11.85c-1.69-1.69-4.57-1.69-6.26,0l-125.27,125.27c-1.69,1.69-1.69,4.57,0,6.26l11.85,11.85c1.69,1.69,4.57,1.69,6.26,0l26.07-26.24v88.37c0,7.28,5.92,13.37,13.37,13.37h50.11c7.28,0,13.37-5.92,13.37-13.37v-44.35c0-2.54,2.03-4.4,4.4-4.4h16.76c2.37,0,4.4,2.03,4.4,4.4v44.35c0,7.28,5.92,13.37,13.37,13.37h50.11c7.28,0,13.37-5.92,13.37-13.37v-98.19c0-2.54-2.03-4.4-4.4-4.4h-7.45c-20.99,0-38.77-16.59-39.27-37.58-.51-21.67,17.44-39.61,39.11-39.1,20.99.34,37.58,18.28,37.58,39.27v123.41c0,2.54,2.03,4.4,4.4,4.4h16.76c2.54,0,4.4-2.03,4.4-4.4v-124.26c-.17-36.9-31.49-66.53-69.07-63.82Z'/%3E%3Ccircle fill='%232a9993' cx='1065.61' cy='65.94' r='12.7'/%3E%3C/g%3E%3C/svg%3E">
 <style>
-:root {
-  --teal:        #3DBFBF;
-  --teal-dark:   #29A0A0;
-  --teal-deeper: #1D8080;
-  --teal-light:  #E6F6F6;
-  --teal-xlight: #F0FAFA;
-  --grad-a:      #4ECDC4;
-  --grad-b:      #3DBFBF;
-  --grad-c:      #45A89C;
-  --charcoal:    #3D3D3D;
-  --n50:  #FAFAFA; --n100: #F5F5F5; --n150: #EEEEEE;
-  --n200: #E5E5E5; --n300: #CCCCCC; --n500: #8A8A8A;
-  --n700: #555555; --n900: #222222;
-  --tx:   #222222; --txs: #555555; --txm: #999999;
-  --ok:   #27A67A; --ok-l: #E7F6F0;
-  --warn: #E8972A; --warn-l: #FEF5E6;
-  --err:  #D94040; --err-l: #FDEAEA;
-  --surf: #FFFFFF;
-  --bdr:  #E2E2E2;
-  --sh-s: 0 1px 3px rgba(0,0,0,.06),0 1px 2px rgba(0,0,0,.04);
-  --sh-m: 0 4px 14px rgba(0,0,0,.08),0 2px 4px rgba(0,0,0,.04);
-  --sh-l: 0 12px 32px rgba(0,0,0,.11),0 4px 8px rgba(0,0,0,.05);
-  --r:8px; --rl:12px;
-  --font:'IBM Plex Sans',sans-serif;
-  --mono:'IBM Plex Mono',monospace;
+:root{
+  --bg:#f0f2f5;--card:#ffffff;--border:#d1d5db;--text:#1e293b;--dim:#6b7280;
+  --muted:#4b5563;--accent:#059669;--adim:rgba(6,214,160,.12);
+  --warn:#d97706;--wdim:rgba(251,191,36,.1);--danger:#ef4444;--ddim:rgba(239,68,68,.1);
+  --blue:#2563eb;--bdim:rgba(59,130,246,.1);--purple:#7c3aed;--cyan:#0891b2;
 }
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-html{font-size:15px}
-body{font-family:var(--font);background:var(--n100);color:var(--tx);min-height:100vh;line-height:1.55}
-/* NAV */
-.nav{
-  background:#fff;border-bottom:1px solid var(--bdr);
-  border-top:3px solid var(--teal);
-  height:58px;display:flex;align-items:center;padding:0 28px;gap:0;
-  position:sticky;top:0;z-index:100;box-shadow:var(--sh-s);
-}
-.nav-div{width:1px;height:24px;background:var(--bdr);margin:0 16px}
-.nav-title{font-size:13px;font-weight:500;color:var(--txs)}
-.nav-sp{flex:1}
-.nav-pill{
-  display:flex;align-items:center;gap:7px;font-size:12px;color:var(--txs);
-  background:var(--n100);border:1px solid var(--bdr);padding:5px 13px;border-radius:20px;
-}
-.sdot{width:7px;height:7px;border-radius:50%;background:var(--n300);transition:background .3s}
-.sdot.on{background:var(--ok);box-shadow:0 0 6px rgba(39,166,122,.5);animation:blink 2.5s infinite}
-.sdot.err{background:var(--err)}
-@keyframes blink{0%,100%{opacity:1}60%{opacity:.4}}
-/* PAGE */
-.page{max-width:1340px;margin:0 auto;padding:28px 28px 72px}
-.ph{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:26px}
-.ph h1{font-size:21px;font-weight:600;letter-spacing:-.25px}
-.ph p{font-size:13.5px;color:var(--txs);margin-top:5px;max-width:560px}
-.tags{display:flex;gap:7px;margin-top:11px;flex-wrap:wrap}
-.tag{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:500;padding:3px 9px;border-radius:20px;border:1px solid}
-.t-teal{background:var(--teal-xlight);color:var(--teal-deeper);border-color:rgba(61,191,191,.35)}
-.t-grn{background:var(--ok-l);color:#1A7A57;border-color:#A7DFC8}
-.t-gray{background:var(--n150);color:var(--n700);border-color:var(--n300)}
-/* BUTTONS */
-.btn{
-  display:inline-flex;align-items:center;gap:7px;
-  font-family:var(--font);font-size:13px;font-weight:500;
-  padding:8px 16px;border-radius:var(--r);border:1px solid transparent;
-  cursor:pointer;transition:all .13s;white-space:nowrap;
-}
-.bp{background:linear-gradient(135deg,var(--grad-a),var(--grad-c));color:#fff;border-color:var(--teal-dark)}
-.bp:hover{filter:brightness(1.08);transform:translateY(-1px);box-shadow:var(--sh-m)}
-.bs{background:var(--surf);color:var(--teal-deeper);border-color:var(--teal)}
-.bs:hover{background:var(--teal-xlight)}
-.bo{background:var(--surf);color:var(--txs);border-color:var(--bdr)}
-.bo:hover{border-color:var(--n300);background:var(--n50)}
-.btn:disabled{opacity:.5;cursor:not-allowed;transform:none!important;filter:none!important}
-.abar{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:24px}
-/* STATS */
-.stats{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;margin-bottom:26px}
-@media(max-width:960px){.stats{grid-template-columns:repeat(3,1fr)}}
-.sc{
-  background:var(--surf);border:1px solid var(--bdr);
-  border-top:3px solid var(--teal);border-radius:var(--rl);
-  padding:15px 17px;box-shadow:var(--sh-s);
-}
-.sc-lbl{font-size:10.5px;font-weight:600;text-transform:uppercase;letter-spacing:.7px;color:var(--txm);margin-bottom:7px}
-.sc-val{font-size:21px;font-weight:700;font-family:var(--mono);color:var(--tx);letter-spacing:-.5px}
-.sc-sub{font-size:11px;color:var(--txm);margin-top:3px}
-/* SECTION HEADING */
-.sh{display:flex;align-items:center;gap:10px;margin-bottom:16px}
-.sh h2{font-size:13.5px;font-weight:600;color:var(--tx);white-space:nowrap}
-.shline{flex:1;height:1px;background:var(--bdr)}
-/* WINNER */
-.winner{
-  background:linear-gradient(135deg,#1A5C5C 0%,#1E7070 60%,#236868 100%);
-  border-radius:var(--rl);padding:20px 26px;color:#fff;
-  display:none;align-items:center;gap:0;flex-wrap:wrap;
-  margin-bottom:20px;box-shadow:var(--sh-m);
-}
-.winner.vis{display:flex}
-.wm{padding:0 24px;border-right:1px solid rgba(255,255,255,.15)}
-.wm:first-child{padding-left:0}
-.wm:last-child{border-right:none}
-.wlbl{font-size:10.5px;font-weight:600;letter-spacing:.9px;text-transform:uppercase;opacity:.6;margin-bottom:5px}
-.wval{font-size:26px;font-weight:700;font-family:var(--mono);letter-spacing:-1px;line-height:1}
-.wsub{font-size:11.5px;opacity:.65;margin-top:4px}
-.wchip{
-  display:inline-block;background:rgba(255,255,255,.18);
-  border:1px solid rgba(255,255,255,.28);border-radius:20px;
-  padding:3px 10px;font-size:11px;font-weight:600;letter-spacing:.3px;margin-top:5px;
-}
-/* BENCH */
-.bgrid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-bottom:26px}
-@media(max-width:760px){.bgrid{grid-template-columns:1fr}}
-.bcard{background:var(--surf);border:1px solid var(--bdr);border-radius:var(--rl);box-shadow:var(--sh-s);overflow:hidden}
-.bhead{display:flex;align-items:center;gap:11px;padding:16px 18px;border-bottom:1px solid var(--bdr);background:var(--n50)}
-.bicon{width:34px;height:34px;border-radius:8px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
-.bi-t{background:var(--teal-xlight)} .bi-g{background:var(--ok-l)}
-.bhead h3{font-size:13.5px;font-weight:600;color:var(--tx)}
-.bhead p{font-size:11.5px;color:var(--txs);margin-top:1px}
-.bbody{padding:4px 18px 16px}
-.qt{width:100%;border-collapse:collapse;font-size:12.5px}
-.qt th{text-align:left;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;color:var(--txm);padding:10px 0 7px;border-bottom:1px solid var(--bdr)}
-.qt td{padding:8px 0;border-bottom:1px solid var(--n150);vertical-align:middle}
-.qt tr:last-child td{border-bottom:none}
-.qt tfoot td{padding-top:11px;font-size:12px}
-.tp{display:inline-block;padding:2px 8px;border-radius:12px;font-family:var(--mono);font-size:11.5px;font-weight:500}
-.tf{background:var(--ok-l);color:#1A7A57} .tm{background:var(--warn-l);color:#8A5A10} .ts{background:var(--err-l);color:#A02020} .tn{background:var(--n150);color:var(--n700)}
-.bt{height:5px;background:var(--n200);border-radius:3px}
-.bf{height:5px;border-radius:3px;transition:width .5s ease}
-.bf-t{background:linear-gradient(90deg,var(--grad-a),var(--grad-c))} .bf-g{background:var(--ok)}
-/* PILLS */
-.pills{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:18px}
-.pill{background:var(--surf);border:1px solid var(--bdr);color:var(--txs);font-size:12.5px;font-weight:500;padding:6px 14px;border-radius:20px;cursor:pointer;transition:all .13s}
-.pill:hover{border-color:var(--teal);color:var(--teal-deeper)}
-.pill.active{background:var(--teal);border-color:var(--teal-dark);color:#fff}
-/* RESULT PANEL */
-.rp{background:var(--surf);border:1px solid var(--bdr);border-radius:var(--rl);box-shadow:var(--sh-s);overflow:hidden}
-.rph{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--bdr);background:var(--n50);flex-wrap:wrap;gap:10px}
-.rpt{font-size:13.5px;font-weight:600;color:var(--tx)}
-.rpm{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
-.rpmi{font-size:12px;color:var(--txs);display:flex;align-items:center;gap:5px}
-.rpmi strong{font-family:var(--mono);font-size:12px;color:var(--tx)}
-.spd{font-size:12px;font-weight:600;font-family:var(--mono);padding:3px 10px;border-radius:20px}
-.sp+{background:var(--ok-l);color:#1A7A57} .sp-{background:var(--err-l);color:#A02020}
-.scols{display:grid;grid-template-columns:1fr 1fr}
-@media(max-width:760px){.scols{grid-template-columns:1fr}}
-.scol{border-right:1px solid var(--bdr)}
-.scol:last-child{border-right:none}
-.scolh{display:flex;align-items:center;gap:7px;padding:10px 16px;font-size:12px;font-weight:600;border-bottom:1px solid var(--bdr);color:var(--txs)}
-.cd{width:8px;height:8px;border-radius:50%} .cd-t{background:var(--teal)} .cd-g{background:var(--ok)}
-.dtw{overflow:auto;max-height:300px}
-.dt{width:100%;border-collapse:collapse;font-size:12px}
-.dt thead th{background:var(--n50);color:var(--txm);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;padding:7px 13px;border-bottom:1px solid var(--bdr);position:sticky;top:0;text-align:left;white-space:nowrap}
-.dt tbody td{padding:7px 13px;border-bottom:1px solid var(--n150);font-family:var(--mono);white-space:nowrap}
-.dt tbody tr:last-child td{border-bottom:none}
-.dt tbody tr:hover td{background:var(--teal-xlight)}
-.sqlbox{font-family:var(--mono);font-size:11.5px;color:var(--n700);background:#F5FAFA;border-top:1px solid var(--bdr);padding:13px 18px;white-space:pre-wrap;word-break:break-all;max-height:130px;overflow-y:auto;line-height:1.7;display:none}
-.sqlbox.open{display:block}
-/* MISC */
-.empty{text-align:center;padding:44px 24px;color:var(--txm)}
-.empty svg{opacity:.22;margin:0 auto 12px;display:block}
-.empty p{font-size:13px}
-.spin{display:inline-block;width:15px;height:15px;border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;animation:sp .7s linear infinite}
-.spin-t{border-color:rgba(61,191,191,.2);border-top-color:var(--teal)}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:system-ui,sans-serif}
+
+/* ── header ── */
+.hdr{background:linear-gradient(135deg,#1e293b,#0f172a);border-bottom:1px solid #334155;
+     padding:0 28px;height:54px;display:flex;align-items:center;justify-content:space-between;
+     position:sticky;top:0;z-index:300}
+.hdr-left{display:flex;align-items:center;gap:12px}
+.logo-svg{width:36px;height:36px;flex-shrink:0}
+.hdr h1{font-size:18px;font-weight:700;letter-spacing:-.4px;color:#e2e8f0}
+.hdr h1 span{color:#34d399}
+.hdr-sub{color:#94a3b8;font-size:11px}
+.hdr-right{display:flex;align-items:center;gap:12px}
+.live-badge{background:rgba(52,211,153,.18);color:#34d399;padding:3px 10px;border-radius:5px;
+            font-size:11px;font-weight:600;font-family:'Courier New',monospace;
+            animation:blink 2s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.55}}
+.dot-live{width:8px;height:8px;border-radius:50%;background:#34d399;
+          box-shadow:0 0 6px #059669;display:inline-block}
+#conn{color:#94a3b8;font-family:'Courier New',monospace;font-size:11px}
+
+/* ── tabs ── */
+.tabs{background:#f8fafc;border-bottom:1px solid var(--border);
+      padding:8px 28px;display:flex;gap:4px;overflow-x:auto;
+      position:sticky;top:54px;z-index:200}
+.tab{background:0;border:1px solid transparent;color:var(--muted);padding:8px 16px;
+     border-radius:7px;cursor:pointer;font-size:13px;font-family:inherit;
+     transition:.18s;white-space:nowrap;font-weight:500}
+.tab:hover{color:var(--text);background:rgba(0,0,0,.04)}
+.tab.on{background:var(--adim);border-color:rgba(6,214,160,.3);color:var(--accent);font-weight:600}
+.tab.reload-tab{border-color:rgba(251,191,36,.3);color:var(--warn)}
+.tab.reload-tab.on{background:var(--wdim);border-color:rgba(251,191,36,.5);color:var(--warn)}
+
+/* ── layout ── */
+.main{padding:24px 28px;max-width:1440px;margin:0 auto}
+.pnl{display:none}.pnl.on{display:block;animation:fi .25s ease}
+@keyframes fi{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+
+/* ── section header ── */
+.sec-hdr{margin-bottom:20px}
+.sec-hdr .n{background:linear-gradient(135deg,var(--accent),var(--cyan));color:#fff;
+            width:30px;height:30px;border-radius:7px;display:inline-flex;align-items:center;
+            justify-content:center;font-size:13px;font-weight:800;
+            font-family:'Courier New',monospace;margin-right:10px;vertical-align:middle}
+.sec-hdr h2{display:inline;font-size:20px;font-weight:700;vertical-align:middle}
+.sec-hdr .d{color:var(--dim);font-size:13px;margin-top:4px;margin-left:40px}
+
+/* ── summary bar ── */
+.sbar{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:18px;padding:14px 18px;
+      background:var(--card);border:1px solid var(--border);border-radius:11px;align-items:center}
+.sstat{text-align:center;min-width:80px}
+.sstat .l{color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:.5px}
+.sstat .v{font-size:22px;font-weight:700;font-family:'Courier New',monospace}
+.rabtn{background:linear-gradient(135deg,var(--purple),var(--blue));color:#fff;border:0;
+       padding:10px 22px;border-radius:7px;font-size:13px;font-weight:700;
+       cursor:pointer;font-family:inherit;margin-left:auto;transition:.15s}
+.rabtn:hover{opacity:.85}.rabtn:disabled{opacity:.4;cursor:wait}
+
+/* ── query cards ── */
+.qgrid{display:grid;grid-template-columns:1fr;gap:12px;margin-bottom:24px}
+.qcard{background:var(--card);border:1px solid var(--border);border-radius:11px;
+       box-shadow:0 1px 3px rgba(0,0,0,.07);overflow:hidden;transition:.18s}
+.qcard:hover{border-color:rgba(6,214,160,.3)}
+.qbar{display:flex;align-items:center;gap:10px;padding:13px 16px;cursor:pointer}
+.qid{min-width:32px;height:24px;border-radius:5px;display:flex;align-items:center;
+     justify-content:center;font-family:'Courier New',monospace;font-size:11px;font-weight:700}
+.p0 .qid{background:var(--adim);color:var(--accent)}
+.p1 .qid{background:var(--bdim);color:var(--blue)}
+.p2 .qid{background:rgba(167,139,250,.15);color:var(--purple)}
+.qname{flex:1;font-size:14px;font-weight:500}
+.qdesc{color:var(--dim);font-size:11px}
+.qtm .t{background:var(--adim);color:var(--accent);padding:2px 8px;border-radius:4px;
+        font-size:11px;font-weight:600;font-family:'Courier New',monospace}
+.qtm .t.slow{background:var(--wdim);color:var(--warn)}
+.qtm .r{color:var(--dim);margin-left:6px;font-size:11px}
+.rbtn{background:var(--adim);color:var(--accent);border:1px solid rgba(6,214,160,.3);
+      padding:5px 12px;border-radius:5px;cursor:pointer;font-family:'Courier New',monospace;
+      font-size:11px;font-weight:600;transition:.15s}
+.rbtn:hover{background:rgba(6,214,160,.22)}.rbtn:disabled{opacity:.4;cursor:wait}
+.qbody{display:none;padding:0 16px 16px}.qcard.open .qbody{display:block}
+.qsql{background:#f8fafc;border-radius:6px;padding:10px 12px;
+      font-family:'Courier New',monospace;font-size:11px;color:var(--muted);
+      line-height:1.55;max-height:180px;overflow:auto;margin-bottom:10px;
+      white-space:pre-wrap;word-break:break-all}
+.qactions{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap}
+.qres{overflow-x:auto;max-height:380px;overflow-y:auto;border-radius:6px}
+
+/* ── table ── */
+table{width:100%;border-collapse:collapse;font-size:12px;font-family:'Courier New',monospace}
+th{text-align:left;padding:7px 10px;color:var(--dim);font-size:10px;text-transform:uppercase;
+   letter-spacing:.5px;border-bottom:1px solid var(--border);font-weight:500;
+   position:sticky;top:0;background:var(--card);z-index:1}
+td{padding:7px 10px;border-bottom:1px solid var(--border)}
+tr:last-child td{border-bottom:none}
+.empty{color:var(--dim);padding:20px;text-align:center;font-size:13px}
+.spinner{width:26px;height:26px;border:3px solid var(--border);border-top-color:var(--accent);
+         border-radius:50%;animation:sp .75s linear infinite;margin:0 auto}
 @keyframes sp{to{transform:rotate(360deg)}}
-.toasts{position:fixed;bottom:22px;right:22px;display:flex;flex-direction:column;gap:8px;z-index:9999}
-.toast{background:#1A3A3A;color:#fff;font-size:13px;padding:11px 16px;border-radius:8px;box-shadow:var(--sh-l);max-width:360px;display:flex;align-items:center;gap:9px;animation:tin .2s ease;border-left:3px solid var(--teal)}
-.toast.err{border-left-color:var(--err)} .toast.ok{border-left-color:var(--ok)}
-@keyframes tin{from{transform:translateX(16px);opacity:0}to{transform:none;opacity:1}}
+
+/* ── SQL editor ── */
+.sqled{width:100%;min-height:140px;background:#f8fafc;border:1px solid var(--border);
+       border-radius:8px;color:var(--text);font-family:'Courier New',monospace;
+       font-size:13px;padding:14px;resize:vertical;line-height:1.6}
+.sqled:focus{outline:0;border-color:var(--accent)}
+.runbtn{background:linear-gradient(135deg,var(--accent),var(--cyan));color:#fff;border:0;
+        padding:10px 22px;border-radius:7px;font-size:13px;font-weight:700;
+        cursor:pointer;font-family:inherit;margin-top:10px;transition:.15s}
+.runbtn:hover{opacity:.85}
+
+/* ── RELOAD PANEL ── */
+.reload-card{background:var(--card);border:1px solid var(--border);border-radius:12px;
+             overflow:hidden;margin-bottom:14px}
+.reload-hdr{background:#0f172a;padding:18px 22px;display:flex;align-items:center;
+            justify-content:space-between;gap:14px;flex-wrap:wrap}
+.reload-title{color:#e2e8f0;font-size:16px;font-weight:700}
+.reload-sub{color:#94a3b8;font-size:12px;margin-top:2px}
+.reload-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.btn-reload{background:linear-gradient(135deg,#d97706,#b45309);color:#fff;border:0;
+            padding:10px 24px;border-radius:8px;font-size:13px;font-weight:700;
+            cursor:pointer;font-family:inherit;transition:.15s;white-space:nowrap}
+.btn-reload:hover{opacity:.88}.btn-reload:disabled{opacity:.4;cursor:not-allowed}
+.btn-abort{background:var(--ddim);color:var(--danger);border:1px solid rgba(239,68,68,.3);
+           padding:8px 16px;border-radius:8px;font-size:12px;font-weight:600;
+           cursor:pointer;font-family:inherit;transition:.15s}
+.btn-abort:hover{background:rgba(239,68,68,.2)}.btn-abort:disabled{opacity:.4;cursor:not-allowed}
+
+.reload-body{padding:20px 22px}
+.reload-steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
+              gap:10px;margin-bottom:18px}
+.step-card{background:var(--bg);border:1px solid var(--border);border-radius:8px;
+           padding:12px 14px;transition:.2s}
+.step-card.active{border-color:var(--warn);background:var(--wdim)}
+.step-card.done{border-color:var(--accent);background:var(--adim)}
+.step-card.error{border-color:var(--danger);background:var(--ddim)}
+.step-num{font-family:'Courier New',monospace;font-size:10px;font-weight:700;
+          color:var(--dim);margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em}
+.step-name{font-size:12px;font-weight:600}
+.step-file{font-family:'Courier New',monospace;font-size:11px;color:var(--muted);margin-top:2px}
+.step-status{font-size:10px;font-weight:600;margin-top:5px}
+.step-status.idle{color:var(--dim)}.step-status.active{color:var(--warn)}
+.step-status.done{color:var(--accent)}.step-status.error{color:var(--danger)}
+
+/* log box */
+.logbox{background:#0d1117;border:1px solid #30363d;border-radius:8px;
+        height:340px;overflow-y:auto;padding:12px 14px;
+        font-family:'Courier New',monospace;font-size:11px;line-height:1.7}
+.log-line{display:flex;gap:10px;padding:1px 0;border-bottom:1px solid rgba(255,255,255,.03)}
+.log-ts{color:#484f58;min-width:60px;flex-shrink:0}
+.log-msg{flex:1;word-break:break-all}
+.log-info   .log-msg{color:#8b949e}
+.log-step   .log-msg{color:#79c0ff;font-weight:600}
+.log-ok     .log-msg{color:#3fb950}
+.log-notice .log-msg{color:#d29922}
+.log-error  .log-msg{color:#f85149}
+.log-done   .log-msg{color:#58a6ff;font-weight:700;font-size:12px}
+.log-log    .log-msg{color:#8b949e}
+
+.reload-status-bar{display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+                   background:var(--bg);border:1px solid var(--border);
+                   border-radius:8px;padding:10px 14px;margin-bottom:12px}
+.rstat{font-size:12px;color:var(--dim)}
+.rstat strong{color:var(--text);font-family:'Courier New',monospace}
+.spin-ring{width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--warn);
+           border-radius:50%;animation:sp .7s linear infinite;display:none;flex-shrink:0}
+.spin-ring.active{display:inline-block}
+
+/* ── footer ── */
+.ft{margin-top:32px;padding:14px 0;border-top:1px solid var(--border);
+    display:flex;justify-content:space-between;color:var(--dim);font-size:11px}
 </style>
-</head>
-<body>
-<nav class="nav">
-  <a href="#" style="text-decoration:none;margin-right:18px;display:flex;align-items:baseline;gap:4px">
-    <span style="font-size:17px;font-weight:800;letter-spacing:1px;color:#27A67A;font-family:'IBM Plex Sans',sans-serif">EDB</span>
-    <span style="font-size:17px;font-weight:700;letter-spacing:.5px;color:#27A67A;font-family:'IBM Plex Sans',sans-serif">WHPG</span>
-  </a>
-  <div class="nav-div"></div>
-  <span class="nav-title">PGAA Analytics Benchmark</span>
-  <div class="nav-sp"></div>
-  <div class="nav-pill">
-    <span class="sdot" id="sdot"></span>
-    <span id="stxt">Connecting…</span>
-  </div>
-</nav>
-<div class="page">
-  <div class="ph">
+</head><body>
+
+<!-- HEADER -->
+<div class="hdr">
+  <div class="hdr-left">
+    <svg class="logo-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+      <g transform="translate(-862,18)">
+        <path fill="#2a9993" d="M1060.7,2.12c-30.98,2.37-56.03,27.09-58.74,58.06-2.88,33.35,19.98,61.96,50.96,68.22v61.62c0,2.54-2.03,4.4-4.4,4.4h-16.76c-2.54,0-4.4-2.03-4.4-4.4v-44.35c0-7.28-5.92-13.37-13.37-13.37h-49.94c-7.28,0-13.37,5.92-13.37,13.37v44.35c0,2.54-2.03,4.4-4.4,4.4h-16.76c-2.37,0-4.4-2.03-4.4-4.4v-97.17l73.47-73.47c1.69-1.69,1.69-4.57,0-6.26l-11.85-11.85c-1.69-1.69-4.57-1.69-6.26,0l-125.27,125.27c-1.69,1.69-1.69,4.57,0,6.26l11.85,11.85c1.69,1.69,4.57,1.69,6.26,0l26.07-26.24v88.37c0,7.28,5.92,13.37,13.37,13.37h50.11c7.28,0,13.37-5.92,13.37-13.37v-44.35c0-2.54,2.03-4.4,4.4-4.4h16.76c2.37,0,4.4,2.03,4.4,4.4v44.35c0,7.28,5.92,13.37,13.37,13.37h50.11c7.28,0,13.37-5.92,13.37-13.37v-98.19c0-2.54-2.03-4.4-4.4-4.4h-7.45c-20.99,0-38.77-16.59-39.27-37.58-.51-21.67,17.44-39.61,39.11-39.1,20.99.34,37.58,18.28,37.58,39.27v123.41c0,2.54,2.03,4.4,4.4,4.4h16.76c2.54,0,4.4-2.03,4.4-4.4v-124.26c-.17-36.9-31.49-66.53-69.07-63.82Z"/>
+        <circle fill="#2a9993" cx="1065.61" cy="65.94" r="12.7"/>
+      </g>
+    </svg>
     <div>
-      <h1>Iceberg vs Native WHPG — Performance Benchmark</h1>
-      <p>Live comparison of Apache Iceberg tables via PGAA foreign data wrapper against native WarehousePG MPP AOCO tables across 8 analytical queries.</p>
-      <div class="tags">
-        <span class="tag t-teal">PGAA / Apache Iceberg</span>
-        <span class="tag t-grn">Native WHPG (AOCO)</span>
-        <span class="tag t-gray">5 tables · 8 queries</span>
-      </div>
+      <h1>WarehousePG <span>AI Analytics</span></h1>
+      <div class="hdr-sub">Lab 3 — pgvector + MADlib + AI Factory · Jan–Apr 2026</div>
     </div>
   </div>
-  <div class="stats">
-    <div class="sc"><div class="sc-lbl">Customers</div><div class="sc-val" id="st-customers">—</div><div class="sc-sub">rows</div></div>
-    <div class="sc"><div class="sc-lbl">Products</div><div class="sc-val" id="st-products">—</div><div class="sc-sub">rows</div></div>
-    <div class="sc"><div class="sc-lbl">Orders</div><div class="sc-val" id="st-orders">—</div><div class="sc-sub">rows</div></div>
-    <div class="sc"><div class="sc-lbl">Order Items</div><div class="sc-val" id="st-order_items">—</div><div class="sc-sub">rows</div></div>
-    <div class="sc"><div class="sc-lbl">Events</div><div class="sc-val" id="st-events">—</div><div class="sc-sub">rows</div></div>
-    <div class="sc"><div class="sc-lbl">Queries</div><div class="sc-val">8</div><div class="sc-sub">benchmark queries</div></div>
-  </div>
-  <div class="abar">
-    <button class="btn bp" id="btn-bench" onclick="runParallel()">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-      Run Full Benchmark
-    </button>
-    <button class="btn bs" onclick="runSerial('iceberg')">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-      Iceberg Sequential
-    </button>
-    <button class="btn bo" onclick="runSerial('native')">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-      Native Sequential
-    </button>
-    <button class="btn bo" onclick="loadStats()">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
-      Refresh
-    </button>
-  </div>
-  <div class="sh"><h2>Benchmark Results</h2><div class="shline"></div></div>
-  <div class="winner" id="winner">
-    <div class="wm"><div class="wlbl">Winner</div><div class="wval" id="w-name">—</div><div class="wchip" id="w-chip"></div></div>
-    <div class="wm"><div class="wlbl">Native Wall Time</div><div class="wval" id="w-nat">—</div><div class="wsub">parallel</div></div>
-    <div class="wm"><div class="wlbl">Iceberg Wall Time</div><div class="wval" id="w-ice">—</div><div class="wsub">parallel</div></div>
-    <div class="wm"><div class="wlbl">Speedup</div><div class="wval" id="w-factor">—</div><div class="wsub">faster engine</div></div>
-  </div>
-  <div class="bgrid">
-    <div class="bcard">
-      <div class="bhead">
-        <div class="bicon bi-g">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--ok)" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3"/></svg>
-        </div>
-        <div><h3>Native WHPG (AOCO)</h3><p>Append-Optimized Column-Oriented (AOCO) tables</p></div>
-      </div>
-      <div class="bbody">
-        <table class="qt">
-          <thead><tr><th>Query</th><th>Time</th><th>Rows</th><th style="width:72px">Rel.</th></tr></thead>
-          <tbody id="nat-tb"><tr><td colspan="4"><div class="empty" style="padding:20px"><div class="spin spin-t" style="margin:0 auto 8px"></div><p>Awaiting run…</p></div></td></tr></tbody>
-          <tfoot id="nat-tf"></tfoot>
-        </table>
-      </div>
-    </div>
-    <div class="bcard">
-      <div class="bhead">
-        <div class="bicon bi-t">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--teal-dark)" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
-        </div>
-        <div><h3>Apache Iceberg (PGAA)</h3><p>External table via PGAA foreign data wrapper</p></div>
-      </div>
-      <div class="bbody">
-        <table class="qt">
-          <thead><tr><th>Query</th><th>Time</th><th>Rows</th><th style="width:72px">Rel.</th></tr></thead>
-          <tbody id="ice-tb"><tr><td colspan="4"><div class="empty" style="padding:20px"><div class="spin spin-t" style="margin:0 auto 8px"></div><p>Awaiting run…</p></div></td></tr></tbody>
-          <tfoot id="ice-tf"></tfoot>
-        </table>
-      </div>
-    </div>
-  </div>
-  <div class="sh" style="margin-top:4px"><h2>Query Drill-Down</h2><div class="shline"></div></div>
-  <div class="pills" id="pills"></div>
-  <div id="cpanel">
-    <div class="rp">
-      <div class="empty">
-        <svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-        <p>Select a query above to compare Iceberg vs Native results side-by-side</p>
-      </div>
-    </div>
+  <div class="hdr-right">
+    <span class="dot-live"></span>
+    <div class="live-badge">LIVE</div>
+    <div id="conn">connecting…</div>
   </div>
 </div>
-<div class="toasts" id="toasts"></div>
-<script>
-const fmtMs=ms=>ms<1000?`${Math.round(ms)}ms`:`${(ms/1000).toFixed(2)}s`;
-const fmtN=n=>n==null?'—':n>=1e6?`${(n/1e6).toFixed(1)}M`:n>=1e3?`${(n/1e3).toFixed(1)}K`:String(n);
-const tcls=ms=>ms<500?'tf':ms<2000?'tm':'ts';
-function toast(msg,type='info'){
-  const el=document.createElement('div');
-  el.className=`toast${type==='error'?' err':type==='success'?' ok':''}`;
-  el.textContent=msg;
-  document.getElementById('toasts').appendChild(el);
-  setTimeout(()=>el.remove(),4200);
-}
-async function api(url){const r=await fetch(url);if(!r.ok)throw new Error(`HTTP ${r.status}`);return r.json();}
-let meta={};
-async function init(){
-  try{meta=await api('/api/queries');renderPills();}catch(e){toast('Could not load queries: '+e.message,'error');}
-  await loadStats();
-}
-init();
-function renderPills(){
-  const w=document.getElementById('pills'); w.innerHTML='';
-  Object.entries(meta).forEach(([k,v])=>{
-    const b=document.createElement('button');
-    b.className='pill'; b.textContent=v.name;
-    b.onclick=()=>{document.querySelectorAll('.pill').forEach(p=>p.classList.remove('active'));b.classList.add('active');cmp(k,v);};
-    w.appendChild(b);
-  });
-}
-async function loadStats(){
-  setS('Querying…',null);
-  try{
-    const d=await api('/api/stats');
-    d.rows.forEach(([t,c])=>{const el=document.getElementById(`st-${t}`);if(el)el.textContent=fmtN(c);});
-    setS('Connected · WHPG',true);
-  }catch(e){setS('DB unavailable',false);}
-}
-function setS(txt,ok){
-  document.getElementById('stxt').textContent=txt;
-  const d=document.getElementById('sdot');
-  d.className='sdot'+(ok===true?' on':ok===false?' err':'');
-}
-function renderBench(tbId,tfId,rows,barCls){
-  const tb=document.getElementById(tbId),tf=document.getElementById(tfId);
-  if(!rows||!rows.length){tb.innerHTML='<tr><td colspan="4" style="padding:16px;color:var(--txm)">No data</td></tr>';return;}
-  const mx=Math.max(...rows.map(r=>r.exec_time_ms||0))||1;
-  tb.innerHTML=rows.map(r=>{
-    const ms=r.exec_time_ms||0,pct=Math.max(4,Math.round(ms/mx*100));
-    // r.name is always returned by the API; meta lookup is a bonus
-    const nm=r.name||(meta[r.id]&&meta[r.id].name)||r.id||'Query';
-    const errCell=r.error?`<td colspan="2" style="color:var(--err);font-size:11px">⚠ ${r.error}</td>`
-      :`<td style="font-family:var(--mono);color:var(--txm)">${fmtN(r.row_count)}</td><td><div class="bt"><div class="bf ${barCls}" style="width:${pct}%"></div></div></td>`;
-    return `<tr><td>${nm}</td><td><span class="tp ${tcls(ms)}">${fmtMs(ms)}</span></td>${errCell}</tr>`;
-  }).join('');
-  const tot=rows.reduce((s,r)=>s+(r.exec_time_ms||0),0);
-  tf.innerHTML=`<tr><td style="font-weight:600">Total (sum)</td><td colspan="3"><span class="tp tn">${fmtMs(Math.round(tot))}</span></td></tr>`;
-}
-async function runParallel(){
-  const btn=document.getElementById('btn-bench');
-  btn.disabled=true; btn.innerHTML='<span class="spin"></span> Running…';
-  // ensure meta is loaded before we try to render names
-  if(!Object.keys(meta).length){
-    try{meta=await api('/api/queries');renderPills();}catch(e){}
-  }
-  ['nat-tb','ice-tb'].forEach(id=>{document.getElementById(id).innerHTML=`<tr><td colspan="4"><div class="empty" style="padding:20px"><div class="spin spin-t" style="margin:0 auto 8px"></div><p>Executing…</p></div></td></tr>`;});
-  toast('Running all queries on both engines in parallel…');
-  try{
-    const d=await api('/api/run_parallel');
-    console.log('run_parallel response:', JSON.stringify(d).slice(0,200));
-    if(!d||!d.native||!d.iceberg){throw new Error('Unexpected response shape: '+JSON.stringify(d));}
-    renderBench('nat-tb','nat-tf',d.native.queries,'bf-g');
-    renderBench('ice-tb','ice-tf',d.iceberg.queries,'bf-t');
-    const iw=d.iceberg.wall_time_ms,nw=d.native.wall_time_ms;
-    const nf=nw<iw,f=(nf?iw/nw:nw/iw).toFixed(2);
-    const wn=nf?'Native AOCO':'Iceberg (PGAA)';
-    document.getElementById('w-name').textContent=wn;
-    document.getElementById('w-chip').textContent=nf?'AOCO wins':'PGAA wins';
-    document.getElementById('w-nat').textContent=fmtMs(nw);
-    document.getElementById('w-ice').textContent=fmtMs(iw);
-    document.getElementById('w-factor').textContent=`${f}×`;
-    document.getElementById('winner').classList.add('vis');
-    toast(`Benchmark complete — ${wn} faster by ${f}×`,'success');
-  }catch(e){
-    console.error('runParallel error:',e);
-    toast('Benchmark failed: '+e.message,'error');
-    ['nat-tb','ice-tb'].forEach(id=>{document.getElementById(id).innerHTML=`<tr><td colspan="4" style="padding:16px;color:var(--err);font-size:12px">⚠ ${e.message}</td></tr>`;});
-  }
-  btn.disabled=false;
-  btn.innerHTML='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run Full Benchmark';
-}
-async function runSerial(mode){
-  toast(`Running all queries on ${mode} (sequential)…`);
-  try{
-    const d=await api(`/api/run_all/${mode}`);
-    const it=mode==='iceberg';
-    renderBench(it?'ice-tb':'nat-tb',it?'ice-tf':'nat-tf',d.queries,it?'bf-t':'bf-g');
-    toast(`${mode} done in ${fmtMs(d.total_time_ms)}`,'success');
-  }catch(e){toast(e.message,'error');}
-}
-async function cmp(qid,qm){
-  const panel=document.getElementById('cpanel');
-  panel.innerHTML=`<div class="rp"><div class="empty" style="padding:28px"><div class="spin spin-t" style="margin:0 auto 10px"></div><p>Running comparison…</p></div></div>`;
-  try{
-    const d=await api(`/api/compare/${qid}`);
-    const ice=d.iceberg,nat=d.native;
-    const ims=ice.exec_time_ms||0,nms=nat.exec_time_ms||0;
-    let spd='';
-    if(ims>0&&nms>0){
-      const nf=nms<ims,f=(nf?ims/nms:nms/ims).toFixed(2);
-      spd=`<span class="spd ${nf?'sp+':'sp-'}">AOCO ${nf?f+'× faster':f+'× slower'}</span>`;
-    }
-    const mkTbl=res=>{
-      if(res.error)return`<div style="padding:16px;color:var(--err);font-size:13px">⚠ ${res.error}</div>`;
-      if(!res.rows?.length)return`<div style="padding:16px;color:var(--txm);font-size:13px">No rows returned</div>`;
-      return`<div class="dtw"><table class="dt"><thead><tr>${res.columns.map(c=>`<th>${c}</th>`).join('')}</tr></thead><tbody>${res.rows.map(r=>`<tr>${r.map(v=>`<td>${v??'NULL'}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
-    };
-    panel.innerHTML=`<div class="rp">
-      <div class="rph">
-        <span class="rpt">${d.name}</span>
-        <div class="rpm">
-          ${spd}
-          <div class="rpmi"><span class="cd cd-g"></span>AOCO: <strong>${fmtMs(nms)}</strong></div>
-          <div class="rpmi"><span class="cd cd-t"></span>Iceberg: <strong>${fmtMs(ims)}</strong></div>
-          <button class="btn bo" style="padding:4px 10px;font-size:11.5px" onclick="var b=this.nextElementSibling;b.classList.toggle('open');this.textContent=b.classList.contains('open')?'SQL ▴':'SQL ▾'">SQL ▾</button>
-          <div class="sqlbox">${qm.sql||''}</div>
+
+<!-- TABS -->
+<div class="tabs" id="tabs">
+  <button class="tab on"  onclick="switchTab(0)">Part A: pgvector</button>
+  <button class="tab"     onclick="switchTab(1)">Part B: MADlib / SQL</button>
+  <button class="tab"     onclick="switchTab(2)">Part C: AI Factory</button>
+  <button class="tab"     onclick="switchTab(3)" style="border-color:rgba(167,139,250,.3);color:var(--purple)">SQL Editor</button>
+  <button class="tab reload-tab" onclick="switchTab(4)" id="tab-reload">⟳ Data Reload</button>
+</div>
+
+<div class="main" id="main">
+
+  <!-- Query panels injected by JS (pnl-0, pnl-1, pnl-2) -->
+
+  <!-- SQL EDITOR -->
+  <div class="pnl" id="pnl-3">
+    <div class="sec-hdr">
+      <span class="n">Q</span><h2>SQL Editor</h2>
+      <div class="d">Run any SELECT against the live dataset</div>
+    </div>
+    <textarea class="sqled" id="sqlin" spellcheck="false">SELECT event_id, hostname, program,
+    LEFT(message, 80) AS message, severity
+FROM netvista_demo.syslog_embeddings
+LIMIT 20;</textarea>
+    <button class="runbtn" onclick="runSQL()">▶ Run Query</button>
+    <span id="sqlt" style="margin-left:12px"></span>
+    <div style="margin-top:14px;overflow-x:auto;max-height:500px;overflow-y:auto" id="sqlr"></div>
+  </div>
+
+  <!-- DATA RELOAD -->
+  <div class="pnl" id="pnl-4">
+    <div class="sec-hdr">
+      <span class="n" style="background:linear-gradient(135deg,var(--warn),#b45309)">↺</span>
+      <h2>Data Reload</h2>
+      <div class="d">Re-runs all 5 SQL scripts — refreshes timestamps and rebuilds all derived tables including K-Means assignments</div>
+    </div>
+
+    <div class="reload-card">
+      <div class="reload-hdr">
+        <div>
+          <div class="reload-title">Full Dataset Reload</div>
+          <div class="reload-sub">{{ workshop_dir }} — drops schema, reseeds, loads ~50M rows (Jan–Apr 2026), rebuilds pgvector embeddings, MADlib features &amp; K-Means cluster assignments</div>
+        </div>
+        <div class="reload-actions">
+          <div class="spin-ring" id="reload-spinner"></div>
+          <button class="btn-reload" id="btn-reload" onclick="startReload()">⟳ Start Reload</button>
+          <button class="btn-abort"  id="btn-abort"  onclick="abortReload()" disabled>✕ Abort</button>
         </div>
       </div>
-      <div class="scols">
-        <div class="scol"><div class="scolh"><span class="cd cd-g"></span>Native AOCO — ${fmtMs(nms)} · ${fmtN(nat.row_count)} rows</div>${mkTbl(nat)}</div>
-        <div class="scol"><div class="scolh"><span class="cd cd-t"></span>Iceberg (PGAA) — ${fmtMs(ims)} · ${fmtN(ice.row_count)} rows</div>${mkTbl(ice)}</div>
+
+      <div class="reload-body">
+        <!-- Status bar -->
+        <div class="reload-status-bar">
+          <div class="rstat">Status: <strong id="rstat-txt">Idle</strong></div>
+          <div class="rstat">Steps: <strong id="rstat-step">—</strong></div>
+          <div class="rstat">Elapsed: <strong id="rstat-elapsed">—</strong></div>
+        </div>
+
+        <!-- Step cards -->
+        <div class="reload-steps" id="reload-steps">
+          {% for fname, label in reload_scripts %}
+          <div class="step-card" id="step-{{ loop.index0 }}">
+            <div class="step-num">Step {{ loop.index }}</div>
+            <div class="step-name">{{ label }}</div>
+            <div class="step-file">{{ fname }}</div>
+            <div class="step-status idle" id="step-st-{{ loop.index0 }}">Waiting</div>
+          </div>
+          {% endfor %}
+        </div>
+
+        <!-- Log -->
+        <div style="font-size:11px;color:var(--dim);margin-bottom:6px;
+                    display:flex;justify-content:space-between;align-items:center">
+          <span>Live output</span>
+          <button onclick="clearLog()" style="background:0;border:0;color:var(--dim);
+                  cursor:pointer;font-size:11px;font-family:inherit">Clear</button>
+        </div>
+        <div class="logbox" id="reload-log">
+          <div class="log-line log-info">
+            <span class="log-ts">--:--:--</span>
+            <span class="log-msg">Ready — click "Start Reload" to refresh all data to current timestamps.</span>
+          </div>
+        </div>
       </div>
+    </div>
+
+    <!-- Info card -->
+    <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px 22px">
+      <div style="font-weight:600;margin-bottom:10px;font-size:14px">Why you need this</div>
+      <div style="font-size:13px;color:var(--muted);line-height:1.8">
+        The pgvector queries (A1, A2) and MADlib features (B1–B3) are static tables built from the
+        netflow/syslog data. The AI Factory query (C1) filters for anomalous IPs using aggregates over
+        <code style="background:var(--bg);padding:1px 5px;border-radius:3px;font-family:'Courier New',monospace">netflow_features</code>
+        which was populated from timestamped source data. After ~6h those source rows age out and the
+        features table may look sparse. A full reload re-inserts ~50M rows
+        and rebuilds all derived tables including the K-Means cluster assignments used by B3
+        (using MADlib kmeanspp if available, or a pure-SQL z-score fallback) —
+        takes approximately <strong>3–5 minutes</strong>.
+      </div>
+      <div style="margin-top:14px;display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px">
+        {% for fname, label in reload_scripts %}
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:10px 12px">
+          <div style="font-family:'Courier New',monospace;font-size:10px;color:var(--accent);margin-bottom:3px">{{ fname }}</div>
+          <div style="font-size:12px;font-weight:500">{{ label }}</div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <div class="ft">
+    <div>EDB WarehousePG — Lab 3: AI-Powered Analytics</div>
+    <div style="font-family:'Courier New',monospace">pgvector + MADlib + AI Factory</div>
+  </div>
+</div><!-- /main -->
+
+<script>
+const PANELS  = {{ panels|tojson }};
+const QUERIES = {{ queries|tojson }};
+const results = {};
+
+// ── health check ──────────────────────────────────────────────────────────
+fetch('/api/health').then(r=>r.json()).then(d=>{
+  const el = document.getElementById('conn');
+  el.textContent  = d.status==='ok' ? 'Connected' : 'Error: '+d.error;
+  el.style.color  = d.status==='ok' ? '#34d399' : '#ef4444';
+}).catch(()=>{
+  document.getElementById('conn').textContent='Offline';
+  document.getElementById('conn').style.color='#ef4444';
+});
+
+// ── helpers ───────────────────────────────────────────────────────────────
+function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function fmtMs(ms){ return ms<1000 ? ms+'ms' : (ms/1000).toFixed(1)+'s'; }
+function tbl(rows){
+  if(!rows||!rows.length)
+    return '<div class="empty">No results — data may need a reload (timestamps expired, 06_ai_analytics.sql not run, or 07_kmeans_fallback.sql not run)</div>';
+  const ks=Object.keys(rows[0]);
+  let h='<table><thead><tr>'+ks.map(k=>'<th>'+esc(k)+'</th>').join('')+'</tr></thead><tbody>';
+  rows.forEach(r=>{ h+='<tr>'+ks.map(k=>'<td>'+(r[k]!=null?esc(String(r[k])):'—')+'</td>').join('')+'</tr>'; });
+  return h+'</tbody></table>';
+}
+
+// ── build query panels ────────────────────────────────────────────────────
+function buildPanels(){
+  const main   = document.getElementById('main');
+  const anchor = document.getElementById('pnl-3');
+  PANELS.forEach((p, pi)=>{
+    const qs = QUERIES.filter(q=>q.panel===pi);
+    let h = `<div class="pnl${pi===0?' on':''}" id="pnl-${pi}">`;
+    h += `<div class="sec-hdr"><span class="n">${p.icon}</span><h2>${p.name}</h2><div class="d">${esc(p.desc)}</div></div>`;
+    h += `<div class="sbar">
+      <div class="sstat"><div class="l">Queries</div><div class="v" style="color:var(--accent)">${qs.length}</div></div>
+      <div class="sstat"><div class="l">Completed</div><div class="v" style="color:var(--blue)" id="done-${pi}">0</div></div>
+      <div class="sstat"><div class="l">Total Time</div><div class="v" style="color:var(--warn)" id="tms-${pi}">—</div></div>
+      <button class="rabtn" id="rabtn-${pi}" onclick="runPanel(${pi})">▶ Run All ${qs.length}</button>
     </div>`;
-  }catch(e){panel.innerHTML=`<div class="rp"><div class="empty"><p>Error: ${e.message}</p></div></div>`;toast('Compare failed: '+e.message,'error');}
+    h += `<div class="qgrid">`;
+    qs.forEach(q=>{
+      h += `<div class="qcard p${pi}" id="qc-${q.id}">
+        <div class="qbar" onclick="toggle('${q.id}')">
+          <span class="qid">${q.id.toUpperCase()}</span>
+          <div style="flex:1"><div class="qname">${esc(q.name)}</div><div class="qdesc">${esc(q.desc)}</div></div>
+          <span class="qtm" id="qt-${q.id}"></span>
+          <button class="rbtn" id="rb-${q.id}" onclick="event.stopPropagation();runQ('${q.id}')">Run</button>
+        </div>
+        <div class="qbody">
+          <div class="qsql">${esc(q.sql)}</div>
+          <div class="qactions">
+            <button class="rbtn" onclick="runQ('${q.id}')">▶ Run</button>
+            <button class="rbtn" onclick="copyQ('${q.id}')" style="background:var(--bdim);color:var(--blue);border-color:rgba(59,130,246,.3)">Copy SQL</button>
+            <button class="rbtn" onclick="toEditor('${q.id}')" style="background:rgba(167,139,250,.1);color:var(--purple);border-color:rgba(167,139,250,.3)">Edit in SQL</button>
+          </div>
+          <div class="qres" id="qr-${q.id}"></div>
+        </div>
+      </div>`;
+    });
+    h += `</div></div>`;
+    const div = document.createElement('div');
+    div.innerHTML = h;
+    main.insertBefore(div.firstChild, anchor);
+  });
 }
+
+function switchTab(i){
+  document.querySelectorAll('.tab').forEach((t,j)=>t.classList.toggle('on',j===i));
+  document.querySelectorAll('.pnl').forEach((p,j)=>p.classList.toggle('on',j===i));
+}
+function toggle(id){ document.getElementById('qc-'+id)?.classList.toggle('open'); }
+
+// ── run query ─────────────────────────────────────────────────────────────
+async function runQ(id){
+  const btn=document.getElementById('rb-'+id);
+  btn.disabled=true; btn.textContent='…';
+  document.getElementById('qr-'+id).innerHTML='<div style="padding:20px;text-align:center"><div class="spinner"></div></div>';
+  document.getElementById('qc-'+id).classList.add('open');
+  try{
+    const r=await(await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})})).json();
+    results[id]=r;
+    const slow=r.ms>5000;
+    document.getElementById('qt-'+id).innerHTML=`<span class="t${slow?' slow':''}">${fmtMs(r.ms)}</span><span class="r" style="color:var(--dim);margin-left:6px">${r.rows} rows</span>`;
+    document.getElementById('qr-'+id).innerHTML=r.error
+      ?`<div style="color:var(--danger);padding:12px;font-family:'Courier New',monospace;font-size:12px">ERROR: ${esc(r.error)}</div>`
+      :tbl(r.data);
+  }catch(e){
+    document.getElementById('qr-'+id).innerHTML=`<div style="color:var(--danger);padding:12px">${e.message}</div>`;
+  }
+  btn.disabled=false; btn.textContent='Run';
+  updatePanel(QUERIES.find(q=>q.id===id).panel);
+}
+
+async function runPanel(pi){
+  const btn=document.getElementById('rabtn-'+pi);
+  btn.disabled=true; btn.textContent='Running…';
+  for(const q of QUERIES.filter(q=>q.panel===pi)) await runQ(q.id);
+  btn.disabled=false; btn.textContent='▶ Run All '+QUERIES.filter(q=>q.panel===pi).length;
+}
+
+function updatePanel(pi){
+  const qs=QUERIES.filter(q=>q.panel===pi);
+  const done=qs.filter(q=>results[q.id]);
+  const ms=done.reduce((s,q)=>s+(results[q.id]?.ms||0),0);
+  document.getElementById('done-'+pi).textContent=done.length;
+  document.getElementById('tms-'+pi).textContent=done.length?fmtMs(Math.round(ms)):'—';
+}
+
+function copyQ(id){ navigator.clipboard.writeText(QUERIES.find(q=>q.id===id).sql+';'); }
+function toEditor(id){
+  document.getElementById('sqlin').value=QUERIES.find(q=>q.id===id).sql+';';
+  switchTab(3);
+}
+
+// ── SQL editor ────────────────────────────────────────────────────────────
+async function runSQL(){
+  const sql=document.getElementById('sqlin').value;
+  document.getElementById('sqlr').innerHTML='<div style="padding:20px;text-align:center"><div class="spinner"></div></div>';
+  document.getElementById('sqlt').innerHTML='';
+  try{
+    const r=await(await fetch('/api/sql',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sql})})).json();
+    if(r.error){
+      document.getElementById('sqlr').innerHTML=`<div style="color:var(--danger);padding:16px;font-family:'Courier New',monospace;font-size:12px">ERROR: ${esc(r.error)}</div>`;
+      return;
+    }
+    const slow=r.ms>5000;
+    document.getElementById('sqlt').innerHTML=`<span style="background:var(--adim);color:var(--accent);padding:3px 10px;border-radius:4px;font-size:11px;font-family:'Courier New',monospace;font-weight:600">${fmtMs(r.ms)}</span><span style="color:var(--dim);font-size:12px;margin-left:6px">${r.rows} rows</span>`;
+    document.getElementById('sqlr').innerHTML=tbl(r.data);
+  }catch(e){
+    document.getElementById('sqlr').innerHTML=`<div style="color:var(--danger);padding:16px">${e.message}</div>`;
+  }
+}
+
+// ── DATA RELOAD ───────────────────────────────────────────────────────────
+let reloadPollTimer = null;
+let reloadStartTs   = null;
+let lastLogLen      = 0;
+
+const STEP_KEYWORDS = [
+  '01_schema',
+  '02_seed_reference',
+  '03_load_external',
+  '06_ai_analytics',
+  '07_kmeans_fallback',
+];
+
+function setStepState(idx, state){
+  const card = document.getElementById('step-'+idx);
+  const st   = document.getElementById('step-st-'+idx);
+  if(!card) return;
+  card.className = 'step-card'+(state!=='idle'?' '+state:'');
+  st.className   = 'step-status '+state;
+  st.textContent = {idle:'Waiting',active:'Running…',done:'✓ Done',error:'✗ Error'}[state]||state;
+}
+
+function guessActiveStep(logLines){
+  for(let i=logLines.length-1;i>=0;i--){
+    const msg=logLines[i][2]||'';
+    for(let s=0;s<STEP_KEYWORDS.length;s++){
+      if(msg.includes(STEP_KEYWORDS[s])) return s;
+    }
+  }
+  return -1;
+}
+
+function renderLog(logLines, append=false){
+  const box=document.getElementById('reload-log');
+  if(!append){ box.innerHTML=''; lastLogLen=0; }
+  const newLines=logLines.slice(lastLogLen);
+  newLines.forEach(([ts,lvl,msg])=>{
+    const div=document.createElement('div');
+    div.className='log-line log-'+lvl;
+    div.innerHTML=`<span class="log-ts">${esc(ts)}</span><span class="log-msg">${esc(msg)}</span>`;
+    box.appendChild(div);
+  });
+  if(newLines.length) box.scrollTop=box.scrollHeight;
+  lastLogLen=logLines.length;
+}
+
+async function pollReload(){
+  try{
+    const r=await(await fetch('/api/reload/status')).json();
+    renderLog(r.log, true);
+
+    if(reloadStartTs){
+      const sec=Math.round((Date.now()-reloadStartTs)/1000);
+      document.getElementById('rstat-elapsed').textContent=sec+'s';
+    }
+
+    const activeStep=guessActiveStep(r.log);
+    for(let i=0;i<STEP_KEYWORDS.length;i++){
+      const isDone  = activeStep>i || (!r.running && r.log.some(([,,m])=>m&&m.includes('✓')&&m.includes(STEP_KEYWORDS[i])));
+      const isErr   = r.log.some(([,l])=>l==='error') && activeStep===i && !isDone;
+      const isActive= r.running && activeStep===i;
+      setStepState(i, isDone?'done':isErr?'error':isActive?'active':'idle');
+    }
+
+    const stepsDone=STEP_KEYWORDS.filter((_,i)=>
+      r.log.some(([,,m])=>m&&m.includes('✓')&&m.includes(STEP_KEYWORDS[i]))
+    ).length;
+    document.getElementById('rstat-step').textContent=stepsDone+' / '+STEP_KEYWORDS.length;
+
+    if(r.running){
+      document.getElementById('rstat-txt').textContent='Running';
+      document.getElementById('reload-spinner').classList.add('active');
+    } else {
+      document.getElementById('reload-spinner').classList.remove('active');
+      clearInterval(reloadPollTimer); reloadPollTimer=null;
+      document.getElementById('btn-reload').disabled=false;
+      document.getElementById('btn-abort').disabled=true;
+      document.getElementById('rstat-txt').textContent=
+        r.log.some(([,l])=>l==='done') ? '✓ Complete' : 'Idle';
+      document.getElementById('tab-reload').textContent='✓ Reload Done';
+      setTimeout(()=>{ document.getElementById('tab-reload').textContent='⟳ Data Reload'; }, 5000);
+    }
+  }catch(e){ console.error('poll error',e); }
+}
+
+async function startReload(){
+  if(!confirm('This will drop and recreate the entire schema (~5–8 min). Proceed?')) return;
+  lastLogLen=0;
+  document.getElementById('reload-log').innerHTML='';
+  for(let i=0;i<STEP_KEYWORDS.length;i++) setStepState(i,'idle');
+
+  const r=await(await fetch('/api/reload/start',{method:'POST'})).json();
+  if(!r.ok){ alert('Error: '+r.msg); return; }
+
+  reloadStartTs=Date.now();
+  document.getElementById('btn-reload').disabled=true;
+  document.getElementById('btn-abort').disabled=false;
+  document.getElementById('rstat-txt').textContent='Running';
+  document.getElementById('rstat-elapsed').textContent='0s';
+  document.getElementById('reload-spinner').classList.add('active');
+  document.getElementById('tab-reload').textContent='↻ Reloading…';
+  reloadPollTimer=setInterval(pollReload, 1000);
+}
+
+async function abortReload(){
+  if(!confirm('Abort the reload? The current script may still finish.')) return;
+  await fetch('/api/reload/abort',{method:'POST'});
+  clearInterval(reloadPollTimer);
+  document.getElementById('btn-reload').disabled=false;
+  document.getElementById('btn-abort').disabled=true;
+  document.getElementById('rstat-txt').textContent='Aborted';
+  document.getElementById('reload-spinner').classList.remove('active');
+}
+
+function clearLog(){
+  document.getElementById('reload-log').innerHTML='';
+  lastLogLen=0;
+}
+
+// ── init ──────────────────────────────────────────────────────────────────
+buildPanels();
+// Resume poll if reload was already running
+fetch('/api/reload/status').then(r=>r.json()).then(d=>{
+  if(d.running){
+    reloadStartTs=Date.now();
+    document.getElementById('btn-reload').disabled=true;
+    document.getElementById('btn-abort').disabled=false;
+    document.getElementById('reload-spinner').classList.add('active');
+    reloadPollTimer=setInterval(pollReload,1000);
+  } else if(d.log&&d.log.length){
+    renderLog(d.log,false);
+  }
+});
 </script>
-</body>
-</html>
-"""
-def query(sql):
-    conn = psycopg2.connect(**DB_CONFIG)
-    cur = conn.cursor()
-    t0 = time.perf_counter()
-    cur.execute(sql)
-    rows = cur.fetchall()
-    ms = round((time.perf_counter() - t0) * 1000, 2)
-    cols = [d[0] for d in cur.description] if cur.description else []
-    cur.close(); conn.close()
-    return {'columns': cols, 'rows': rows, 'row_count': len(rows), 'exec_time_ms': ms}
-# ---------------------------------------------------------------------------
-# Iceberg queries
-# ---------------------------------------------------------------------------
-Q_ICE = {
-    'count': (
-        'Revenue by Category', 
-        """SELECT p.category, 
-                  COUNT(DISTINCT oi.order_id) as orders, 
-                  SUM(oi.quantity) as units_sold, 
-                  ROUND(SUM(oi.quantity * oi.unit_price)::numeric, 2) as revenue 
-           FROM products_iceberg p 
-           JOIN order_items_iceberg oi ON p.product_id = oi.product_id 
-           GROUP BY p.category 
-           ORDER BY revenue DESC"""
-    ),
-    'status': (
-        'Orders by Status', 
-        """SELECT status, 
-                  COUNT(*) as cnt, 
-                  ROUND(SUM(total_amount)::numeric, 2) as rev 
-           FROM orders_iceberg 
-           GROUP BY status 
-           ORDER BY rev DESC"""
-    ),
-    'top20': (
-        'Top 20 Customers', 
-        """SELECT c.customer_id, 
-                  c.first_name || ' ' || c.last_name as full_name, 
-                  COUNT(o.order_id) as order_count, 
-                  ROUND(SUM(o.total_amount)::numeric, 2) as total_spent 
-           FROM customers_iceberg c 
-           JOIN orders_iceberg o ON c.customer_id = o.customer_id 
-           GROUP BY c.customer_id, full_name 
-           ORDER BY total_spent DESC 
-           LIMIT 20"""
-    ),
-    'category': (
-        'Revenue by Category', 
-        """SELECT p.category, 
-                  SUM(oi.quantity) as total_qty, 
-                  ROUND(SUM(oi.quantity * oi.unit_price)::numeric, 2) as revenue 
-           FROM products_iceberg p 
-           JOIN order_items_iceberg oi ON p.product_id = oi.product_id 
-           GROUP BY p.category 
-           ORDER BY revenue DESC"""
-    ),
-    'funnel': (
-        'Conversion Funnel', 
-        """WITH f AS (
-             SELECT customer_id, 
-                    MAX(CASE WHEN event_type = 'page_view' THEN 1 ELSE 0 END) as v, 
-                    MAX(CASE WHEN event_type = 'add_to_cart' THEN 1 ELSE 0 END) as c, 
-                    MAX(CASE WHEN event_type = 'purchase' THEN 1 ELSE 0 END) as p 
-             FROM events_iceberg 
-             GROUP BY customer_id
-           ) 
-           SELECT SUM(v) as total_views, 
-                  SUM(c) as total_carts, 
-                  SUM(p) as total_purchases, 
-                  ROUND(100.0 * SUM(c) / NULLIF(SUM(v), 0), 2) as cart_rate, 
-                  ROUND(100.0 * SUM(p) / NULLIF(SUM(c), 0), 2) as purchase_rate 
-           FROM f"""
-    ),
-    'daily': (
-        'Daily Dashboard (5 Tables)', 
-        """SELECT o.order_date, 
-                  COUNT(DISTINCT o.order_id) as orders, 
-                  ROUND(SUM(o.total_amount)::numeric, 2) as revenue, 
-                  COUNT(DISTINCT o.customer_id) as customers, 
-                  SUM(oi.quantity) as items, 
-                  COUNT(*) FILTER (WHERE o.status = 'delivered') as delivered, 
-                  COUNT(DISTINCT e.session_id) as sessions 
-           FROM orders_iceberg o 
-           JOIN order_items_iceberg oi ON o.order_id = oi.order_id 
-           JOIN products_iceberg p ON oi.product_id = p.product_id 
-           JOIN customers_iceberg c ON o.customer_id = c.customer_id 
-           LEFT JOIN events_iceberg e ON c.customer_id = e.customer_id AND e.event_date = o.order_date 
-           GROUP BY o.order_date 
-           ORDER BY o.order_date DESC 
-           LIMIT 30"""
-    ),
-    'cat_funnel': (
-        'Funnel by Category (5 Tables)', 
-        """WITH ce AS (
-             SELECT customer_id, 
-                    COUNT(*) FILTER (WHERE event_type = 'page_view') as v, 
-                    COUNT(*) FILTER (WHERE event_type = 'purchase') as p 
-             FROM events_iceberg 
-             GROUP BY customer_id
-           ), 
-           cp AS (
-             SELECT o.customer_id, 
-                    p.category, 
-                    SUM(oi.quantity * oi.unit_price) as s 
-             FROM orders_iceberg o 
-             JOIN order_items_iceberg oi ON o.order_id = oi.order_id 
-             JOIN products_iceberg p ON oi.product_id = p.product_id 
-             GROUP BY o.customer_id, p.category
-           ) 
-           SELECT cp.category, 
-                  COUNT(DISTINCT c.customer_id) as cust_count, 
-                  SUM(ce.v) as views, 
-                  SUM(ce.p) as purchases, 
-                  ROUND(SUM(cp.s)::numeric, 2) as revenue 
-           FROM cp 
-           JOIN customers_iceberg c ON cp.customer_id = c.customer_id 
-           LEFT JOIN ce ON c.customer_id = ce.customer_id 
-           GROUP BY cp.category 
-           ORDER BY revenue DESC"""
-    ),
-    'summary': (
-        'Executive Summary', 
-        """SELECT 
-             (SELECT COUNT(*) FROM customers_iceberg) as total_customers, 
-             (SELECT COUNT(*) FROM products_iceberg) as total_products, 
-             (SELECT COUNT(*) FROM orders_iceberg) as total_orders, 
-             (SELECT ROUND(SUM(total_amount)::numeric, 2) FROM orders_iceberg) as total_revenue, 
-             (SELECT COUNT(*) FROM order_items_iceberg) as total_items, 
-             (SELECT COUNT(*) FROM events_iceberg) as total_events"""
-    ),
-}
-def to_native(sql):
-    return (sql
-            .replace('customers_iceberg', 'demo.customers')
-            .replace('products_iceberg', 'demo.products')
-            .replace('orders_iceberg', 'demo.orders')
-            .replace('order_items_iceberg', 'demo.order_items')
-            .replace('events_iceberg', 'demo.events'))
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
-@app.route('/')
-def index():
-    return Response(DASHBOARD_HTML, mimetype='text/html')
-@app.route('/api/queries')
-def list_queries():
-    return jsonify({k: {'name': v[0], 'sql': v[1]} for k, v in Q_ICE.items()})
-@app.route('/api/query/<qid>')
-def run_iceberg(qid):
-    if qid not in Q_ICE:
-        return jsonify({'error': 'Not found'}), 404
-    name, sql = Q_ICE[qid]
-    try:
-        return jsonify({'name': name, 'type': 'iceberg', 'result': query(sql)})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-@app.route('/api/query/<qid>/native')
-def run_native(qid):
-    if qid not in Q_ICE:
-        return jsonify({'error': 'Not found'}), 404
-    name, sql = Q_ICE[qid]
-    try:
-        return jsonify({'name': name, 'type': 'native', 'result': query(to_native(sql))})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-@app.route('/api/compare/<qid>')
-def compare(qid):
-    if qid not in Q_ICE:
-        return jsonify({'error': 'Not found'}), 404
-    name, sql = Q_ICE[qid]
-    try:
-        ice = query(sql)
-    except Exception as e:
-        ice = {'error': str(e), 'exec_time_ms': 0}
-    try:
-        nat = query(to_native(sql))
-    except Exception as e:
-        nat = {'error': str(e), 'exec_time_ms': 0}
-    total = round(ice.get('exec_time_ms', 0) + nat.get('exec_time_ms', 0), 2)
-    return jsonify({'name': name, 'iceberg': ice, 'native': nat, 'total_time_ms': total})
-@app.route('/api/stats')
-def stats():
-    try:
-        return jsonify(query(
-            "SELECT 'customers', COUNT(*) FROM customers_iceberg "
-            "UNION ALL SELECT 'products', COUNT(*) FROM products_iceberg "
-            "UNION ALL SELECT 'orders', COUNT(*) FROM orders_iceberg "
-            "UNION ALL SELECT 'order_items', COUNT(*) FROM order_items_iceberg "
-            "UNION ALL SELECT 'events', COUNT(*) FROM events_iceberg "
-            "ORDER BY 2 DESC"
-        ))
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-@app.route('/api/run_all/<mode>')
-def run_all(mode):
-    """Run all queries sequentially. mode: iceberg | native"""
-    if mode not in ['iceberg', 'native']:
-        return jsonify({'error': 'Invalid mode'}), 400
-    results = []
-    total_time = 0
-    for qid, (name, sql) in Q_ICE.items():
-        try:
-            r = query(to_native(sql) if mode == 'native' else sql)
-            results.append({'id': qid, 'name': name, 'exec_time_ms': r['exec_time_ms'], 'row_count': r['row_count']})
-            total_time += r['exec_time_ms']
-        except Exception as e:
-            results.append({'id': qid, 'name': name, 'error': str(e), 'exec_time_ms': 0})
-    return jsonify({'mode': mode, 'queries': results, 'total_time_ms': round(total_time, 2), 'query_count': len(results)})
-@app.route('/api/run_parallel')
-def run_parallel():
-    """Run all queries: first all AOCO in parallel, then all Iceberg in parallel.
-    Uses a capped thread pool (max 4) to avoid exhausting WHPG connection limits.
-    Each thread opens its own psycopg2 connection (thread-safe).
-    """
-    import concurrent.futures
-    MAX_WORKERS = 4  # cap to avoid connection exhaustion on WHPG
-    def run_one(qid, name, sql, mode):
-        try:
-            r = query(to_native(sql) if mode == 'native' else sql)
-            return {'id': qid, 'name': name, 'exec_time_ms': r['exec_time_ms'], 'row_count': r['row_count']}
-        except Exception as e:
-            return {'id': qid, 'name': name, 'error': str(e), 'exec_time_ms': 0}
-    order = list(Q_ICE.keys())
-    def run_batch(mode):
-        items = [(qid, name, sql) for qid, (name, sql) in Q_ICE.items()]
-        t0 = time.perf_counter()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-            futs = {ex.submit(run_one, qid, name, sql, mode): qid
-                    for qid, name, sql in items}
-            res = [f.result() for f in concurrent.futures.as_completed(futs)]
-        wall = round((time.perf_counter() - t0) * 1000, 2)
-        res.sort(key=lambda x: order.index(x['id']))
-        return res, wall
-    nat_res, nat_wall = run_batch('native')
-    ice_res, ice_wall = run_batch('iceberg')
-    return jsonify({
-        'native':  {'queries': nat_res, 'wall_time_ms': nat_wall,
-                    'sum_query_times_ms': round(sum(r['exec_time_ms'] for r in nat_res), 2),
-                    'query_count': len(nat_res)},
-        'iceberg': {'queries': ice_res, 'wall_time_ms': ice_wall,
-                    'sum_query_times_ms': round(sum(r['exec_time_ms'] for r in ice_res), 2),
-                    'query_count': len(ice_res)},
-        'total_wall_time_ms': round(nat_wall + ice_wall, 2),
-    })
-if __name__ == '__main__':
-    print('\n  EDB PGAA Dashboard: http://localhost:5000\n')
-    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
+</body></html>"""
+
+
+if __name__ == "__main__":
+    print(f"""
+╔══════════════════════════════════════════════════════╗
+║  Lab 3 — AI Analytics Dashboard (LIVE)              ║
+║  DB: {DB['host']}:{DB['port']}/{DB['dbname']}
+║  Queries: {len(QUERIES)} across {len(PANELS)} panels
+║  Workshop: {WORKSHOP_DIR}
+║  Data: Jan 1 – Apr 23 2026  (~50M rows)             ║
+║  Data: Jan 1 – Apr 23 2026  (~50M rows)             ║
+║  http://0.0.0.0:5002                                ║
+╚══════════════════════════════════════════════════════╝
+    """)
+    app.run(host="0.0.0.0", port=5002, debug=False)
+
 
