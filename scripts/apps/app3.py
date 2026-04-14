@@ -6,7 +6,7 @@ Connects to WarehousePG (gpadmin database, port 5432)
 Setup:
     pip3 install flask psycopg2-binary
     export WHPG_HOST=localhost WHPG_PORT=5432 WHPG_DB=gpadmin WHPG_USER=gpadmin
-    python3 app3.py
+    python3 app2.py
 
 Open: http://localhost:5002
 """
@@ -32,11 +32,11 @@ DB = {
 #   →  07 K-Means assignments (MADlib if available, SQL fallback otherwise)
 WORKSHOP_DIR = os.environ.get("WORKSHOP_DIR", "/home/gpadmin/workshop")
 RELOAD_SCRIPTS = [
-    ("01_schema.sql",         "Drop & recreate schema"),
-    ("02_seed_reference.sql", "Seed reference tables"),
-    ("03_load_external.sql",  "Load external data (~95M rows)"),
-    ("06_ai_analytics.sql",   "Build pgvector embeddings & MADlib features"),
-    ("07_kmeans_fallback.sql","K-Means assignments (MADlib or SQL fallback)"),
+    ("01_schema.sql",            "Drop & recreate schema"),
+    ("02_seed_reference.sql",    "Seed reference tables"),
+    ("03_seed_traffic.sql",      "Seed traffic data (~50M rows, Jan-Apr 2026)"),
+    ("06_ai_analytics.sql",      "Build AI / pgvector analytics"),
+    ("07_kmeans_fallback.sql",   "K-Means assignments (MADlib or SQL fallback)"),
 ]
 
 # Global reload state
@@ -392,7 +392,7 @@ def api_reload_start():
 
             total = round(time.time() - t_total, 1)
             if _reload_running:
-                _append_log("done", f"🎉 Full reload complete in {total}s — pgvector embeddings, MADlib features & K-Means assignments ready")
+                _append_log("done", f"🎉 Full reload complete in {total}s — ~50M rows (Jan–Apr 2026), pgvector embeddings, MADlib features & K-Means assignments ready")
         finally:
             _reload_running = False
 
@@ -617,7 +617,7 @@ tr:last-child td{border-bottom:none}
     </svg>
     <div>
       <h1>WarehousePG <span>AI Analytics</span></h1>
-      <div class="hdr-sub">Lab 3 — pgvector + MADlib + AI Factory</div>
+      <div class="hdr-sub">Lab 3 — pgvector + MADlib + AI Factory · Jan–Apr 2026</div>
     </div>
   </div>
   <div class="hdr-right">
@@ -667,7 +667,7 @@ LIMIT 20;</textarea>
       <div class="reload-hdr">
         <div>
           <div class="reload-title">Full Dataset Reload</div>
-          <div class="reload-sub">{{ workshop_dir }} — drops schema, reseeds, reloads ~95M rows, rebuilds pgvector embeddings, MADlib features &amp; K-Means cluster assignments</div>
+          <div class="reload-sub">{{ workshop_dir }} — drops schema, reseeds, loads ~50M rows (Jan–Apr 2026), rebuilds pgvector embeddings, MADlib features &amp; K-Means cluster assignments</div>
         </div>
         <div class="reload-actions">
           <div class="spin-ring" id="reload-spinner"></div>
@@ -720,10 +720,10 @@ LIMIT 20;</textarea>
         netflow/syslog data. The AI Factory query (C1) filters for anomalous IPs using aggregates over
         <code style="background:var(--bg);padding:1px 5px;border-radius:3px;font-family:'Courier New',monospace">netflow_features</code>
         which was populated from timestamped source data. After ~6h those source rows age out and the
-        features table may look sparse. A full reload re-inserts ~95M rows with <strong>current timestamps</strong>
+        features table may look sparse. A full reload re-inserts ~50M rows
         and rebuilds all derived tables including the K-Means cluster assignments used by B3
         (using MADlib kmeanspp if available, or a pure-SQL z-score fallback) —
-        takes approximately <strong>5–8 minutes</strong>.
+        takes approximately <strong>3–5 minutes</strong>.
       </div>
       <div style="margin-top:14px;display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px">
         {% for fname, label in reload_scripts %}
@@ -1021,7 +1021,11 @@ if __name__ == "__main__":
 ║  DB: {DB['host']}:{DB['port']}/{DB['dbname']}
 ║  Queries: {len(QUERIES)} across {len(PANELS)} panels
 ║  Workshop: {WORKSHOP_DIR}
+║  Data: Jan 1 – Apr 23 2026  (~50M rows)             ║
+║  Data: Jan 1 – Apr 23 2026  (~50M rows)             ║
 ║  http://0.0.0.0:5002                                ║
 ╚══════════════════════════════════════════════════════╝
     """)
     app.run(host="0.0.0.0", port=5002, debug=False)
+
+
