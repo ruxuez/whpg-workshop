@@ -84,7 +84,7 @@ QUERIES = [
     MIN(n.ts) AS first_seen, MAX(n.ts) AS last_seen
 FROM netflow_logs n
 JOIN threat_intel_feeds t ON n.src_ip <<= t.ip_range
-WHERE n.ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59'
+WHERE n.ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59'
   AND t.active = TRUE AND t.confidence >= 80
 GROUP BY 1, 2, 3, 4
 ORDER BY hit_count DESC LIMIT 20"""
@@ -92,11 +92,11 @@ ORDER BY hit_count DESC LIMIT 20"""
     {
         "id": "1b", "panel": 0,
         "name": "1B · Anomaly Detection (z-score)",
-        "desc": "Traffic spikes > 3σ in the last 24h",
+        "desc": "Traffic spikes > 3σ in the current month",
         "sql": """WITH hourly AS (
     SELECT date_trunc('hour', ts) AS hour, src_ip,
         SUM(bytes) AS total_bytes, COUNT(*) AS flow_count
-    FROM netflow_logs WHERE ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59'
+    FROM netflow_logs WHERE ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59'
     GROUP BY 1, 2
 ), stats AS (
     SELECT src_ip, AVG(total_bytes) AS avg_b, STDDEV(total_bytes) AS std_b
@@ -116,7 +116,7 @@ ORDER BY z_score DESC LIMIT 20"""
         "sql": """SELECT network(set_masklen(src_ip, 24)) AS src_subnet,
     COUNT(*) AS flows, SUM(bytes) AS total_bytes,
     COUNT(DISTINCT dst_ip) AS unique_destinations
-FROM netflow_logs WHERE ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59'
+FROM netflow_logs WHERE ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59'
 GROUP BY 1 ORDER BY total_bytes DESC LIMIT 15"""
     },
 
@@ -134,7 +134,7 @@ JOIN firewall_logs f ON s.src_ip = f.src_ip
     AND f.ts BETWEEN s.ts - interval '5 seconds' AND s.ts + interval '5 seconds'
 LEFT JOIN dns_logs d ON s.src_ip = d.client_ip
     AND d.ts BETWEEN s.ts - interval '10 seconds' AND s.ts + interval '10 seconds'
-WHERE s.severity <= 2 AND s.ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59'
+WHERE s.severity <= 2 AND s.ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59'
 ORDER BY s.ts DESC LIMIT 30"""
     },
     {
@@ -152,23 +152,23 @@ JOIN firewall_logs f ON d.client_ip = f.src_ip
 WHERE (d.query_name LIKE '%.evil.%' OR d.query_name LIKE '%.xyz'
    OR d.query_name LIKE '%exfil%' OR d.query_name LIKE '%malware%'
    OR d.query_name LIKE '%c2-%' OR d.query_name LIKE '%darknet%')
-  AND d.ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59'
+  AND d.ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59'
 GROUP BY 1, 2 ORDER BY dns_queries DESC LIMIT 20"""
     },
     {
         "id": "2c", "panel": 1,
         "name": "2C · Log Volume Dashboard",
         "desc": "All 5 sources — $2M+ Splunk savings",
-        "sql": """SELECT 'netflow' AS source, COUNT(*) AS events, pg_size_pretty(pg_total_relation_size('netflow_logs')) AS storage
-    FROM netflow_logs WHERE ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59'
-UNION ALL SELECT 'dns', COUNT(*), pg_size_pretty(pg_total_relation_size('dns_logs'))
-    FROM dns_logs WHERE ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59'
-UNION ALL SELECT 'firewall', COUNT(*), pg_size_pretty(pg_total_relation_size('firewall_logs'))
-    FROM firewall_logs WHERE ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59'
-UNION ALL SELECT 'syslog', COUNT(*), pg_size_pretty(pg_total_relation_size('syslog_events'))
-    FROM syslog_events WHERE ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59'
-UNION ALL SELECT 'bgp', COUNT(*), pg_size_pretty(pg_total_relation_size('bgp_events'))
-    FROM bgp_events WHERE ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59'
+        "sql": """SELECT 'netflow' AS source, COUNT(*) AS events
+    FROM netflow_logs WHERE ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59'
+UNION ALL SELECT 'dns', COUNT(*)
+    FROM dns_logs WHERE ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59'
+UNION ALL SELECT 'firewall', COUNT(*)
+    FROM firewall_logs WHERE ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59'
+UNION ALL SELECT 'syslog', COUNT(*)
+    FROM syslog_events WHERE ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59'
+UNION ALL SELECT 'bgp', COUNT(*)
+    FROM bgp_events WHERE ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59'
 ORDER BY events DESC"""
     },
 
@@ -186,7 +186,7 @@ ORDER BY utilization_pct DESC"""
     {
         "id": "3b", "panel": 2,
         "name": "3B · SLA Breach Timeline",
-        "desc": "Hourly breach/warning per customer — last 6 hours",
+        "desc": "Hourly breach/warning per customer — current month",
         "sql": """SELECT date_trunc('hour', m.ts) AS hour,
     c.customer_name, c.tier,
     ROUND(AVG(m.latency_ms), 1) AS avg_latency,
@@ -197,7 +197,7 @@ ORDER BY utilization_pct DESC"""
 FROM network_metrics m
 JOIN customers c ON m.customer_id = c.customer_id
 JOIN sla_contracts sc ON c.customer_id = sc.customer_id AND sc.effective_to IS NULL
-WHERE m.ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59'
+WHERE m.ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59'
 GROUP BY 1, 2, 3, 5
 HAVING AVG(m.latency_ms) > sc.latency_sla_ms * 0.8
 ORDER BY 1 DESC, avg_latency DESC"""
@@ -216,7 +216,7 @@ ORDER BY 1 DESC, avg_latency DESC"""
 FROM customers c
 JOIN sla_contracts sc ON c.customer_id = sc.customer_id AND sc.effective_to IS NULL
 JOIN regions r ON c.region_id = r.region_id
-JOIN network_metrics m ON c.customer_id = m.customer_id AND m.ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59'
+JOIN network_metrics m ON c.customer_id = m.customer_id AND m.ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59'
 GROUP BY 1, 2, 3, 9
 ORDER BY qoe_score ASC"""
     },
@@ -234,7 +234,7 @@ ORDER BY qoe_score ASC"""
 FROM netflow_logs n
 JOIN threat_intel_feeds t ON n.src_ip <<= t.ip_range AND t.active AND t.confidence >= 80
 LEFT JOIN geo_ip g ON n.src_ip <<= g.network
-WHERE n.ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59'
+WHERE n.ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59'
 GROUP BY 1, 2, 3, 4, 5
 ORDER BY flow_count DESC LIMIT 20"""
     },
@@ -244,19 +244,19 @@ ORDER BY flow_count DESC LIMIT 20"""
         "desc": "Trace 185.220.101.34 across ALL log sources",
         "sql": """SELECT * FROM (
     (SELECT 'netflow' AS source, ts, 'src→' || host(dst_ip) || ':' || dst_port AS detail, bytes::text AS extra
-        FROM netflow_logs WHERE src_ip = '185.220.101.34'::inet AND ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59'
+        FROM netflow_logs WHERE src_ip = '185.220.101.34'::inet AND ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59'
         ORDER BY ts DESC LIMIT 15)
     UNION ALL
     (SELECT 'firewall', ts, action || ' ' || host(dst_ip) || ':' || dst_port, zone_src || '→' || zone_dst
-        FROM firewall_logs WHERE src_ip = '185.220.101.34'::inet AND ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59'
+        FROM firewall_logs WHERE src_ip = '185.220.101.34'::inet AND ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59'
         ORDER BY ts DESC LIMIT 15)
     UNION ALL
     (SELECT 'dns', ts, query_name || ' (' || query_type || ')', response_code
-        FROM dns_logs WHERE client_ip = '185.220.101.34'::inet AND ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59'
+        FROM dns_logs WHERE client_ip = '185.220.101.34'::inet AND ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59'
         ORDER BY ts DESC LIMIT 15)
     UNION ALL
     (SELECT 'syslog', ts, LEFT(message, 80), hostname
-        FROM syslog_events WHERE src_ip = '185.220.101.34'::inet AND ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59'
+        FROM syslog_events WHERE src_ip = '185.220.101.34'::inet AND ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59'
         ORDER BY ts DESC LIMIT 15)
 ) forensic ORDER BY ts DESC LIMIT 40"""
     },
@@ -271,20 +271,20 @@ ORDER BY flow_count DESC LIMIT 20"""
         ROW_NUMBER() OVER (PARTITION BY r.region_code ORDER BY COUNT(*) DESC) AS rn
     FROM netflow_logs n JOIN threat_ips t ON n.src_ip <<= t.ip_range
     JOIN regions r ON n.region_id = r.region_id
-    WHERE n.ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59' GROUP BY 1, 2
+    WHERE n.ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59' GROUP BY 1, 2
 ), rc AS (
     SELECT r.region_code, c.customer_name, AVG(m.latency_ms) AS avg_lat,
         ROW_NUMBER() OVER (PARTITION BY r.region_code ORDER BY AVG(m.latency_ms) DESC) AS rn
     FROM network_metrics m JOIN customers c ON m.customer_id = c.customer_id
     JOIN regions r ON c.region_id = r.region_id
-    WHERE m.ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59' GROUP BY 1, 2
+    WHERE m.ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59' GROUP BY 1, 2
 ), hs AS (
     SELECT r.region_code, network(set_masklen(n.src_ip, 24)) AS subnet,
         COUNT(*) FILTER (WHERE n.src_ip <<= ANY(SELECT ip_range FROM threat_ips)) AS tflows,
         ROW_NUMBER() OVER (PARTITION BY r.region_code ORDER BY
             COUNT(*) FILTER (WHERE n.src_ip <<= ANY(SELECT ip_range FROM threat_ips)) DESC) AS rn
     FROM netflow_logs n JOIN regions r ON n.region_id = r.region_id
-    WHERE n.ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59' GROUP BY 1, 2
+    WHERE n.ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59' GROUP BY 1, 2
 )
 SELECT ts.region_code, ts.category AS top_threat, ts.hits AS threat_hits,
     rc.customer_name AS highest_risk_customer, ROUND(rc.avg_lat, 1) AS their_latency_ms,
@@ -668,7 +668,7 @@ tr:last-child td{border-bottom:none}
     SUM(bytes) AS total_bytes, COUNT(*) AS flow_count
 FROM netflow_logs
 WHERE src_ip <<= '10.128.0.0/16'::cidr
-  AND ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59'
+  AND ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59'
 GROUP BY 1, 2, 3 ORDER BY total_bytes DESC LIMIT 20;</textarea>
     <button class="runbtn" onclick="runSQL()">▶ Run Query</button>
     <span id="sqlt" style="margin-left:12px"></span>
@@ -1040,7 +1040,7 @@ function clearLog(){
 
 // ── Row count ──────────────────────────────────────────────────────────────
 fetch('/api/sql',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sql:
-  "SELECT SUM(c)::bigint AS total FROM (SELECT COUNT(*) AS c FROM netflow_logs WHERE ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59' UNION ALL SELECT COUNT(*) FROM dns_logs WHERE ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59' UNION ALL SELECT COUNT(*) FROM firewall_logs WHERE ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59' UNION ALL SELECT COUNT(*) FROM syslog_events WHERE ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59' UNION ALL SELECT COUNT(*) FROM bgp_events WHERE ts BETWEEN '2026-01-01' AND '2026-04-23 23:59:59' UNION ALL SELECT COUNT(*) FROM network_metrics) x"
+  "SELECT SUM(c)::bigint AS total FROM (SELECT COUNT(*) AS c FROM netflow_logs WHERE ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59' UNION ALL SELECT COUNT(*) FROM dns_logs WHERE ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59' UNION ALL SELECT COUNT(*) FROM firewall_logs WHERE ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59' UNION ALL SELECT COUNT(*) FROM syslog_events WHERE ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59' UNION ALL SELECT COUNT(*) FROM bgp_events WHERE ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59' UNION ALL SELECT COUNT(*) FROM network_metrics) x"
 })}).then(r=>r.json()).then(d=>{
   const t = d.data?.[0]?.total;
   if(t){ document.getElementById('ttl').textContent = fmt(t)+' rows'; document.getElementById('ftr').textContent = fmt(t)+' rows | 7 regions'; }
@@ -1077,4 +1077,5 @@ if __name__ == "__main__":
 ╚══════════════════════════════════════════════════════╝
     """)
     app.run(host="0.0.0.0", port=5001, debug=False)
+
 

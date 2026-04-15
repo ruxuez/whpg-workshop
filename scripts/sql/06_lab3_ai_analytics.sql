@@ -85,77 +85,77 @@ ANALYZE netvista_demo.syslog_embeddings;
 
 -- Query A1: "Find events similar to this SYN flood attack"
 -- The analyst provides a known-bad event signature as a vector
-\timing on
+-- \timing on
 
-SELECT
-    event_id,
-    hostname,
-    program,
-    LEFT(message, 80) AS message,
-    severity,
-    1 - (embedding <=> (
-        SELECT embedding FROM netvista_demo.syslog_embeddings
-        WHERE message LIKE '%SYN flood%'
-        LIMIT 1
-    )) AS similarity_score
-FROM netvista_demo.syslog_embeddings
-ORDER BY embedding <=> (
-    SELECT embedding FROM netvista_demo.syslog_embeddings
-    WHERE message LIKE '%SYN flood%'
-    LIMIT 1
-)
-LIMIT 20;
+-- SELECT
+--     event_id,
+--     hostname,
+--     program,
+--     LEFT(message, 80) AS message,
+--     severity,
+--     1 - (embedding <=> (
+--         SELECT embedding FROM netvista_demo.syslog_embeddings
+--         WHERE message LIKE '%SYN flood%'
+--         LIMIT 1
+--     )) AS similarity_score
+-- FROM netvista_demo.syslog_embeddings
+-- ORDER BY embedding <=> (
+--     SELECT embedding FROM netvista_demo.syslog_embeddings
+--     WHERE message LIKE '%SYN flood%'
+--     LIMIT 1
+-- )
+-- LIMIT 20;
 
--- Query A2: "Find events similar to authentication failures"
-SELECT
-    event_id,
-    hostname,
-    program,
-    LEFT(message, 80) AS message,
-    severity,
-    1 - (embedding <=> (
-        SELECT embedding FROM netvista_demo.syslog_embeddings
-        WHERE message LIKE '%password%'
-        LIMIT 1
-    )) AS similarity_score
-FROM netvista_demo.syslog_embeddings
-ORDER BY embedding <=> (
-    SELECT embedding FROM netvista_demo.syslog_embeddings
-    WHERE message LIKE '%password%'
-    LIMIT 1
-)
-LIMIT 20;
+-- -- Query A2: "Find events similar to authentication failures"
+-- SELECT
+--     event_id,
+--     hostname,
+--     program,
+--     LEFT(message, 80) AS message,
+--     severity,
+--     1 - (embedding <=> (
+--         SELECT embedding FROM netvista_demo.syslog_embeddings
+--         WHERE message LIKE '%password%'
+--         LIMIT 1
+--     )) AS similarity_score
+-- FROM netvista_demo.syslog_embeddings
+-- ORDER BY embedding <=> (
+--     SELECT embedding FROM netvista_demo.syslog_embeddings
+--     WHERE message LIKE '%password%'
+--     LIMIT 1
+-- )
+-- LIMIT 20;
 
--- Query A3: "Cluster similar events — how many distinct attack patterns?"
--- Group events by nearest centroid (using K-means via vector distance)
-WITH attack_patterns AS (
-    SELECT
-        event_id,
-        hostname,
-        program,
-        LEFT(message, 60) AS msg,
-        severity,
-        CASE
-            WHEN message LIKE '%SYN flood%' OR message LIKE '%flooding%' THEN 'DDoS'
-            WHEN message LIKE '%password%' OR message LIKE '%authenticating%' THEN 'Auth Failure'
-            WHEN message LIKE '%DOWN%' OR message LIKE '%Link down%' THEN 'Infra Down'
-            WHEN message LIKE '%OUT OF MEMORY%' OR message LIKE '%OOM%' THEN 'Resource Exhaustion'
-            WHEN message LIKE '%container%' OR message LIKE '%kubelet%' THEN 'Container Event'
-            WHEN message LIKE '%DNS%' OR message LIKE '%query rate%' THEN 'DNS Anomaly'
-            ELSE 'Other'
-        END AS pattern_category
-    FROM netvista_demo.syslog_embeddings
-)
-SELECT
-    pattern_category,
-    COUNT(*) AS event_count,
-    COUNT(DISTINCT hostname) AS affected_hosts,
-    ROUND(AVG(severity), 1) AS avg_severity
-FROM attack_patterns
-GROUP BY 1
-ORDER BY event_count DESC;
+-- -- Query A3: "Cluster similar events — how many distinct attack patterns?"
+-- -- Group events by nearest centroid (using K-means via vector distance)
+-- WITH attack_patterns AS (
+--     SELECT
+--         event_id,
+--         hostname,
+--         program,
+--         LEFT(message, 60) AS msg,
+--         severity,
+--         CASE
+--             WHEN message LIKE '%SYN flood%' OR message LIKE '%flooding%' THEN 'DDoS'
+--             WHEN message LIKE '%password%' OR message LIKE '%authenticating%' THEN 'Auth Failure'
+--             WHEN message LIKE '%DOWN%' OR message LIKE '%Link down%' THEN 'Infra Down'
+--             WHEN message LIKE '%OUT OF MEMORY%' OR message LIKE '%OOM%' THEN 'Resource Exhaustion'
+--             WHEN message LIKE '%container%' OR message LIKE '%kubelet%' THEN 'Container Event'
+--             WHEN message LIKE '%DNS%' OR message LIKE '%query rate%' THEN 'DNS Anomaly'
+--             ELSE 'Other'
+--         END AS pattern_category
+--     FROM netvista_demo.syslog_embeddings
+-- )
+-- SELECT
+--     pattern_category,
+--     COUNT(*) AS event_count,
+--     COUNT(DISTINCT hostname) AS affected_hosts,
+--     ROUND(AVG(severity), 1) AS avg_severity
+-- FROM attack_patterns
+-- GROUP BY 1
+-- ORDER BY event_count DESC;
 
-\timing off
+-- \timing off
 
 
 -- ═══════════════════════════════════════════════════════════════════════════════
@@ -192,51 +192,51 @@ ANALYZE netvista_demo.netflow_features;
 
 -- Step 2: Summary statistics for each feature
 -- This gives the analyst a baseline for "normal" behavior
-SELECT
-    COUNT(*) AS total_profiles,
-    ROUND(AVG(flow_count), 1) AS avg_flows,
-    ROUND(AVG(unique_dsts), 1) AS avg_destinations,
-    ROUND(AVG(unique_ports), 1) AS avg_ports,
-    ROUND(AVG(total_bytes)::numeric, 0) AS avg_bytes,
-    ROUND(AVG(dst_entropy)::numeric, 4) AS avg_dst_entropy,
-    ROUND(AVG(port_spread)::numeric, 4) AS avg_port_spread
-FROM netvista_demo.netflow_features;
+-- SELECT
+--     COUNT(*) AS total_profiles,
+--     ROUND(AVG(flow_count), 1) AS avg_flows,
+--     ROUND(AVG(unique_dsts), 1) AS avg_destinations,
+--     ROUND(AVG(unique_ports), 1) AS avg_ports,
+--     ROUND(AVG(total_bytes)::numeric, 0) AS avg_bytes,
+--     ROUND(AVG(dst_entropy)::numeric, 4) AS avg_dst_entropy,
+--     ROUND(AVG(port_spread)::numeric, 4) AS avg_port_spread
+-- FROM netvista_demo.netflow_features;
 
 -- Step 3: Z-Score anomaly detection (pure SQL, no MADlib needed)
 -- Flag any hourly profile where 2+ features exceed 3 standard deviations
-WITH stats AS (
-    SELECT
-        AVG(flow_count) AS mu_flows, STDDEV_SAMP(flow_count) AS sd_flows,
-        AVG(unique_dsts) AS mu_dsts, STDDEV_SAMP(unique_dsts) AS sd_dsts,
-        AVG(unique_ports) AS mu_ports, STDDEV_SAMP(unique_ports) AS sd_ports,
-        AVG(total_bytes) AS mu_bytes, STDDEV_SAMP(total_bytes) AS sd_bytes
-    FROM netvista_demo.netflow_features
-),
-scored AS (
-    SELECT
-        f.hour, f.src_ip::text,
-        f.flow_count, f.unique_dsts, f.unique_ports, f.total_bytes,
-        ROUND(ABS(f.flow_count - s.mu_flows) / NULLIF(s.sd_flows, 0), 2) AS z_flows,
-        ROUND(ABS(f.unique_dsts - s.mu_dsts) / NULLIF(s.sd_dsts, 0), 2) AS z_dsts,
-        ROUND(ABS(f.unique_ports - s.mu_ports) / NULLIF(s.sd_ports, 0), 2) AS z_ports,
-        ROUND(ABS(f.total_bytes - s.mu_bytes) / NULLIF(s.sd_bytes, 0), 2) AS z_bytes
-    FROM netvista_demo.netflow_features f, stats s
-)
-SELECT
-    hour, src_ip,
-    flow_count, unique_dsts, unique_ports, total_bytes,
-    z_flows, z_dsts, z_ports, z_bytes,
-    (CASE WHEN z_flows > 3 THEN 1 ELSE 0 END +
-     CASE WHEN z_dsts > 3 THEN 1 ELSE 0 END +
-     CASE WHEN z_ports > 3 THEN 1 ELSE 0 END +
-     CASE WHEN z_bytes > 3 THEN 1 ELSE 0 END) AS anomaly_dimensions
-FROM scored
-WHERE (CASE WHEN z_flows > 3 THEN 1 ELSE 0 END +
-       CASE WHEN z_dsts > 3 THEN 1 ELSE 0 END +
-       CASE WHEN z_ports > 3 THEN 1 ELSE 0 END +
-       CASE WHEN z_bytes > 3 THEN 1 ELSE 0 END) >= 2
-ORDER BY anomaly_dimensions DESC, z_bytes DESC
-LIMIT 30;
+-- WITH stats AS (
+--     SELECT
+--         AVG(flow_count) AS mu_flows, STDDEV_SAMP(flow_count) AS sd_flows,
+--         AVG(unique_dsts) AS mu_dsts, STDDEV_SAMP(unique_dsts) AS sd_dsts,
+--         AVG(unique_ports) AS mu_ports, STDDEV_SAMP(unique_ports) AS sd_ports,
+--         AVG(total_bytes) AS mu_bytes, STDDEV_SAMP(total_bytes) AS sd_bytes
+--     FROM netvista_demo.netflow_features
+-- ),
+-- scored AS (
+--     SELECT
+--         f.hour, f.src_ip::text,
+--         f.flow_count, f.unique_dsts, f.unique_ports, f.total_bytes,
+--         ROUND(ABS(f.flow_count - s.mu_flows) / NULLIF(s.sd_flows, 0), 2) AS z_flows,
+--         ROUND(ABS(f.unique_dsts - s.mu_dsts) / NULLIF(s.sd_dsts, 0), 2) AS z_dsts,
+--         ROUND(ABS(f.unique_ports - s.mu_ports) / NULLIF(s.sd_ports, 0), 2) AS z_ports,
+--         ROUND(ABS(f.total_bytes - s.mu_bytes) / NULLIF(s.sd_bytes, 0), 2) AS z_bytes
+--     FROM netvista_demo.netflow_features f, stats s
+-- )
+-- SELECT
+--     hour, src_ip,
+--     flow_count, unique_dsts, unique_ports, total_bytes,
+--     z_flows, z_dsts, z_ports, z_bytes,
+--     (CASE WHEN z_flows > 3 THEN 1 ELSE 0 END +
+--      CASE WHEN z_dsts > 3 THEN 1 ELSE 0 END +
+--      CASE WHEN z_ports > 3 THEN 1 ELSE 0 END +
+--      CASE WHEN z_bytes > 3 THEN 1 ELSE 0 END) AS anomaly_dimensions
+-- FROM scored
+-- WHERE (CASE WHEN z_flows > 3 THEN 1 ELSE 0 END +
+--        CASE WHEN z_dsts > 3 THEN 1 ELSE 0 END +
+--        CASE WHEN z_ports > 3 THEN 1 ELSE 0 END +
+--        CASE WHEN z_bytes > 3 THEN 1 ELSE 0 END) >= 2
+-- ORDER BY anomaly_dimensions DESC, z_bytes DESC
+-- LIMIT 30;
 
 -- Step 4: MADlib K-Means clustering (if MADlib is installed)
 -- Groups all hourly IP profiles into behavioral clusters
