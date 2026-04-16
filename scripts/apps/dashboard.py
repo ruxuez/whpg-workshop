@@ -551,5 +551,5 @@ def update_drilldown(cluster_id, active_tab, pts_json):
 if __name__ == "__main__":
     print("\n  ◈  NetVista K-Means Cluster Explorer")
     print(f"     DB: {DB_CONFIG['user']}@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}")
-    print("     Open http://127.0.0.1:5003\n")
-    app.run(debug=True, host="127.0.0.1", port=5003)
+    print("     Open http://0.0.0.0:5003\n")
+    app.run(debug=False, host="0.0.0.0", port=5003)
