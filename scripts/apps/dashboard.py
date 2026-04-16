@@ -9,7 +9,7 @@ Run:
 
 Then open http://127.0.0.1:5003 in your browser.
 """
-
+from typing import Optional
 import os
 import textwrap
 import pandas as pd
@@ -144,7 +144,7 @@ def load_syslog_sample(cluster_id: int, n: int = 50) -> pd.DataFrame:
 # CHART BUILDERS
 # ─────────────────────────────────────────────
 
-def fig_scatter(df: pd.DataFrame, x_col: str, y_col: str, highlight: int | None):
+def fig_scatter(df: pd.DataFrame, x_col: str, y_col: str, highlight: Optional[int]):
     df = df.copy()
     df["label"] = df["cluster_id"].map(CLUSTER_LABELS).fillna("Unknown")
     df["opacity"] = df["cluster_id"].apply(
@@ -216,7 +216,7 @@ def fig_distribution(summary: pd.DataFrame):
     return fig
 
 
-def fig_time_series(df: pd.DataFrame, highlight: int | None):
+def fig_time_series(df: pd.DataFrame, highlight: Optional[int]):
     df = df.copy()
     df["label"] = df["cluster_id"].map(CLUSTER_LABELS)
     if "hour" in df.columns and df["hour"].notna().any():
