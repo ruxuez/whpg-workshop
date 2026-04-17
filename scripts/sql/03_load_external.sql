@@ -17,7 +17,7 @@ SET statement_mem = '512MB';
 -- Default: gpfdist running locally on port 8081
 -- If remote:  gpfdist://10.0.0.5:8081/netflow_logs.csv
 
-\set GPFDIST_HOST 'localhost'
+\set GPFDIST_HOST 'cdw'
 \set GPFDIST_PORT '8081'
 
 
@@ -389,6 +389,8 @@ WHERE t.active = TRUE;
 -- ANALYZE netvista_demo.ipam_allocations;
 -- ANALYZE netvista_demo.ipam_summary;
 -- ANALYZE netvista_demo.security_incidents;
+set optimizer=off;
+set statement_mem='512MB';
 
 DO $$
 DECLARE
