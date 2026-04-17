@@ -128,8 +128,8 @@ CREATE TABLE netflow_logs (
 ) WITH (appendoptimized=true, orientation=column,compresstype=zstd, compresslevel=3)
 DISTRIBUTED BY (flow_id)
 PARTITION BY RANGE (ts) (
-    START ('2025-01-01'::timestamp) INCLUSIVE
-    END   ('2026-12-31'::timestamp) EXCLUSIVE
+    START ('2026-01-01'::timestamp) INCLUSIVE
+    END   ('2026-05-01'::timestamp) EXCLUSIVE
     EVERY (INTERVAL '1 day')
 );
 
@@ -147,8 +147,8 @@ CREATE TABLE syslog_events (
 ) WITH (appendoptimized=true, orientation=column,compresstype=zstd, compresslevel=3)
 DISTRIBUTED BY (event_id)
 PARTITION BY RANGE (ts) (
-    START ('2025-01-01'::timestamp) INCLUSIVE
-    END   ('2026-12-31'::timestamp) EXCLUSIVE
+    START ('2026-01-01'::timestamp) INCLUSIVE
+    END   ('2026-05-01'::timestamp) EXCLUSIVE
     EVERY (INTERVAL '1 day')
 );
 
@@ -170,8 +170,8 @@ CREATE TABLE firewall_logs (
 ) WITH (appendoptimized=true, orientation=column,compresstype=zstd, compresslevel=3)
 DISTRIBUTED BY (fw_id)
 PARTITION BY RANGE (ts) (
-    START ('2025-01-01'::timestamp) INCLUSIVE
-    END   ('2026-12-31'::timestamp) EXCLUSIVE
+    START ('2026-01-01'::timestamp) INCLUSIVE
+    END   ('2026-05-01'::timestamp) EXCLUSIVE
     EVERY (INTERVAL '1 day')
 );
 
@@ -190,8 +190,8 @@ CREATE TABLE dns_logs (
 ) WITH (appendoptimized=true, orientation=column,compresstype=zstd, compresslevel=3)
 DISTRIBUTED BY (dns_id)
 PARTITION BY RANGE (ts) (
-    START ('2025-01-01'::timestamp) INCLUSIVE
-    END   ('2026-12-31'::timestamp) EXCLUSIVE
+    START ('2026-01-01'::timestamp) INCLUSIVE
+    END   ('2026-05-01'::timestamp) EXCLUSIVE
     EVERY (INTERVAL '1 day')
 );
 
@@ -212,8 +212,8 @@ CREATE TABLE bgp_events (
 ) WITH (appendoptimized=true, orientation=column,compresstype=zstd, compresslevel=3)
 DISTRIBUTED BY (bgp_id)
 PARTITION BY RANGE (ts) (
-    START ('2025-01-01'::timestamp) INCLUSIVE
-    END   ('2026-12-31'::timestamp) EXCLUSIVE
+    START ('2026-01-01'::timestamp) INCLUSIVE
+    END   ('2026-05-01'::timestamp) EXCLUSIVE
     EVERY (INTERVAL '1 day')
 );
 
@@ -262,8 +262,8 @@ CREATE TABLE network_metrics (
 ) WITH (appendoptimized=true, orientation=column,compresstype=zstd, compresslevel=3)
 DISTRIBUTED BY (metric_id)
 PARTITION BY RANGE (ts) (
-    START ('2025-01-01'::timestamp) INCLUSIVE
-    END   ('2026-12-31'::timestamp) EXCLUSIVE
+    START ('2026-01-01'::timestamp) INCLUSIVE
+    END   ('2026-05-01'::timestamp) EXCLUSIVE
     EVERY (INTERVAL '1 day')
 );
 

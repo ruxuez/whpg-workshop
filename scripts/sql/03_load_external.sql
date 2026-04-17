@@ -30,6 +30,7 @@ DO $$ BEGIN RAISE NOTICE '[%] Creating external tables...', clock_timestamp(); E
 -- ── Netflow Logs ────────────────────────────────────────────────────────────
 DROP EXTERNAL TABLE IF EXISTS ext_netflow_logs;
 CREATE READABLE EXTERNAL TABLE ext_netflow_logs (
+    id BIGINT,
     ts              TIMESTAMP,
     src_ip          TEXT,          -- loaded as text, cast to inet on INSERT
     dst_ip          TEXT,
@@ -53,6 +54,7 @@ LOG ERRORS SEGMENT REJECT LIMIT 1000;
 -- ── DNS Logs ────────────────────────────────────────────────────────────────
 DROP EXTERNAL TABLE IF EXISTS ext_dns_logs;
 CREATE READABLE EXTERNAL TABLE ext_dns_logs (
+    id BIGINT,
     ts              TIMESTAMP,
     client_ip       TEXT,
     query_name      VARCHAR(256),
@@ -69,6 +71,7 @@ LOG ERRORS SEGMENT REJECT LIMIT 1000;
 -- ── Firewall Logs ───────────────────────────────────────────────────────────
 DROP EXTERNAL TABLE IF EXISTS ext_firewall_logs;
 CREATE READABLE EXTERNAL TABLE ext_firewall_logs (
+    id BIGINT,
     ts              TIMESTAMP,
     src_ip          TEXT,
     dst_ip          TEXT,
@@ -88,6 +91,7 @@ LOG ERRORS SEGMENT REJECT LIMIT 1000;
 -- ── Syslog Events ───────────────────────────────────────────────────────────
 DROP EXTERNAL TABLE IF EXISTS ext_syslog_events;
 CREATE READABLE EXTERNAL TABLE ext_syslog_events (
+    id BIGINT,
     ts              TIMESTAMP,
     src_ip          TEXT,
     hostname        VARCHAR(128),
@@ -103,6 +107,7 @@ LOG ERRORS SEGMENT REJECT LIMIT 1000;
 -- ── BGP Events ──────────────────────────────────────────────────────────────
 DROP EXTERNAL TABLE IF EXISTS ext_bgp_events;
 CREATE READABLE EXTERNAL TABLE ext_bgp_events (
+    id BIGINT,
     ts              TIMESTAMP,
     peer_ip         TEXT,
     prefix          TEXT,
@@ -121,6 +126,7 @@ LOG ERRORS SEGMENT REJECT LIMIT 1000;
 -- ── Network Metrics ─────────────────────────────────────────────────────────
 DROP EXTERNAL TABLE IF EXISTS ext_network_metrics;
 CREATE READABLE EXTERNAL TABLE ext_network_metrics (
+    id BIGINT,
     ts              TIMESTAMP,
     customer_id     INT,
     region_id       INT,
@@ -160,11 +166,12 @@ TRUNCATE network_metrics;
 -- ── Netflow ─────────────────────────────────────────────────────────────────
 DO $$ BEGIN RAISE NOTICE '[%] Loading netflow_logs (~33M rows)...', clock_timestamp(); END $$;
 
-INSERT INTO netflow_logs (ts, src_ip, dst_ip, src_port, dst_port, protocol,
+INSERT INTO netflow_logs (flow_id, ts, src_ip, dst_ip, src_port, dst_port, protocol,
                           bytes, packets, tcp_flags, flow_duration,
                           src_as, dst_as, input_if, output_if, sampler_id, region_id)
 SELECT
-    ts + (now() - (SELECT MAX(ts) FROM ext_netflow_logs)),
+    id, 
+    ts,
     src_ip::inet,
     dst_ip::inet,
     src_port,
@@ -187,10 +194,11 @@ DO $$ BEGIN RAISE NOTICE '[%] netflow_logs loaded.', clock_timestamp(); END $$;
 -- ── DNS ─────────────────────────────────────────────────────────────────────
 DO $$ BEGIN RAISE NOTICE '[%] Loading dns_logs (~25M rows)...', clock_timestamp(); END $$;
 
-INSERT INTO dns_logs (ts, client_ip, query_name, query_type, response_code,
+INSERT INTO dns_logs (dns_id, ts, client_ip, query_name, query_type, response_code,
                       response_ip, response_time, is_recursive, region_id)
 SELECT
-    ts + (now() - (SELECT MAX(ts) FROM ext_dns_logs)),
+    id, 
+    ts,
     client_ip::inet,
     query_name,
     query_type,
@@ -206,10 +214,11 @@ DO $$ BEGIN RAISE NOTICE '[%] dns_logs loaded.', clock_timestamp(); END $$;
 -- ── Firewall ────────────────────────────────────────────────────────────────
 DO $$ BEGIN RAISE NOTICE '[%] Loading firewall_logs (~22.5M rows)...', clock_timestamp(); END $$;
 
-INSERT INTO firewall_logs (ts, src_ip, dst_ip, src_port, dst_port, protocol,
+INSERT INTO firewall_logs (fw_id, ts, src_ip, dst_ip, src_port, dst_port, protocol,
                            action, rule_id, bytes, zone_src, zone_dst, region_id)
 SELECT
-    ts + (now() - (SELECT MAX(ts) FROM ext_firewall_logs)),
+    id, 
+    ts,
     src_ip::inet,
     dst_ip::inet,
     src_port,
@@ -228,10 +237,11 @@ DO $$ BEGIN RAISE NOTICE '[%] firewall_logs loaded.', clock_timestamp(); END $$;
 -- ── Syslog ──────────────────────────────────────────────────────────────────
 DO $$ BEGIN RAISE NOTICE '[%] Loading syslog_events (~15M rows)...', clock_timestamp(); END $$;
 
-INSERT INTO syslog_events (ts, src_ip, hostname, facility, severity,
+INSERT INTO syslog_events (event_id, ts, src_ip, hostname, facility, severity,
                            program, message, region_id)
 SELECT
-    ts + (now() - (SELECT MAX(ts) FROM ext_syslog_events)),
+    id, 
+    ts,
     src_ip::inet,
     hostname,
     facility,
@@ -246,10 +256,11 @@ DO $$ BEGIN RAISE NOTICE '[%] syslog_events loaded.', clock_timestamp(); END $$;
 -- ── BGP ─────────────────────────────────────────────────────────────────────
 DO $$ BEGIN RAISE NOTICE '[%] Loading bgp_events (~1.5M rows)...', clock_timestamp(); END $$;
 
-INSERT INTO bgp_events (ts, peer_ip, prefix, event_type, as_path,
+INSERT INTO bgp_events (bgp_id, ts, peer_ip, prefix, event_type, as_path,
                         next_hop, origin, local_pref, med, community, region_id)
 SELECT
-    ts + (now() - (SELECT MAX(ts) FROM ext_bgp_events)),
+    id, 
+    ts,
     peer_ip::inet,
     prefix::cidr,
     event_type,
@@ -267,11 +278,12 @@ DO $$ BEGIN RAISE NOTICE '[%] bgp_events loaded.', clock_timestamp(); END $$;
 -- ── Network Metrics ─────────────────────────────────────────────────────────
 DO $$ BEGIN RAISE NOTICE '[%] Loading network_metrics (~150K rows)...', clock_timestamp(); END $$;
 
-INSERT INTO network_metrics (ts, customer_id, region_id, probe_ip,
+INSERT INTO network_metrics (metric_id, ts, customer_id, region_id, probe_ip,
                              latency_ms, jitter_ms, packet_loss_pct,
                              throughput_mbps, mos_score)
 SELECT
-    ts + (now() - (SELECT MAX(ts) FROM ext_network_metrics)),
+    id, 
+    ts,
     customer_id,
     region_id,
     probe_ip::inet,
