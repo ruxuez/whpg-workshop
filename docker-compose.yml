@@ -67,6 +67,7 @@ services:
     volumes:
       - master:/data/master
       - ./scripts:/scripts:ro
+      - ./csv_data:/csv_data:ro
     healthcheck:
       test: ["CMD-SHELL", "test -f /data/master/gpinitsystem_complete &&  su - gpadmin -c \"psql -d template1 -c 'SELECT 1'\""]
       interval: 10s

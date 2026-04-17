@@ -30,23 +30,23 @@ DB = {
 # App2 (AI analytics) needs the full reload:
 #   01 schema  →  02 reference  →  03 external data  →  06 AI/pgvector
 #   →  07 K-Means assignments (MADlib if available, SQL fallback otherwise)
-WORKSHOP_DIR = os.environ.get("WORKSHOP_DIR", "/home/gpadmin/workshop")
-RELOAD_SCRIPTS = [
-    ("01_schema.sql",            "Drop & recreate schema"),
-    ("02_seed_reference.sql",    "Seed reference tables"),
-    ("03_seed_traffic.sql",      "Seed traffic data (~50M rows, Jan-Apr 2026)"),
-    ("06_ai_analytics.sql",      "Build AI / pgvector analytics"),
-    ("07_kmeans_fallback.sql",   "K-Means assignments (MADlib or SQL fallback)"),
-]
+# WORKSHOP_DIR = os.environ.get("WORKSHOP_DIR", "/scripts/sql")
+# RELOAD_SCRIPTS = [
+#     ("01_schema.sql",            "Drop & recreate schema"),
+#     ("02_seed_reference.sql",    "Seed reference tables"),
+#     ("03_seed_traffic.sql",      "Seed traffic data (~50M rows, Jan-Apr 2026)"),
+#     ("06_ai_analytics.sql",      "Build AI / pgvector analytics"),
+#     ("07_kmeans_fallback.sql",   "K-Means assignments (MADlib or SQL fallback)"),
+# ]
 
-# Global reload state
-_reload_lock    = threading.Lock()
-_reload_running = False
-_reload_log     = []   # list of [ts, level, msg]
+# # Global reload state
+# _reload_lock    = threading.Lock()
+# _reload_running = False
+# _reload_log     = []   # list of [ts, level, msg]
 
-def _append_log(level, msg):
-    ts = datetime.now().strftime("%H:%M:%S")
-    _reload_log.append([ts, level, msg])
+# def _append_log(level, msg):
+#     ts = datetime.now().strftime("%H:%M:%S")
+#     _reload_log.append([ts, level, msg])
 
 
 # ── DB helper ────────────────────────────────────────────────────────────────
@@ -331,93 +331,93 @@ def api_health():
 
 
 # ── Data Reload ───────────────────────────────────────────────────────────────
-@app.route("/api/reload/start", methods=["POST"])
-def api_reload_start():
-    global _reload_running, _reload_log
-    with _reload_lock:
-        if _reload_running:
-            return jsonify({"ok": False, "msg": "Reload already in progress"}), 409
-        _reload_running = True
-        _reload_log = []
+# @app.route("/api/reload/start", methods=["POST"])
+# def api_reload_start():
+#     global _reload_running, _reload_log
+#     with _reload_lock:
+#         if _reload_running:
+#             return jsonify({"ok": False, "msg": "Reload already in progress"}), 409
+#         _reload_running = True
+#         _reload_log = []
 
-    def _run():
-        global _reload_running
-        try:
-            _append_log("info", f"Starting full data reload in {WORKSHOP_DIR}")
-            _append_log("info", f"Running {len(RELOAD_SCRIPTS)} scripts sequentially")
-            t_total = time.time()
+#     def _run():
+#         global _reload_running
+#         try:
+#             _append_log("info", f"Starting full data reload in {WORKSHOP_DIR}")
+#             _append_log("info", f"Running {len(RELOAD_SCRIPTS)} scripts sequentially")
+#             t_total = time.time()
 
-            for fname, label in RELOAD_SCRIPTS:
-                fpath = os.path.join(WORKSHOP_DIR, fname)
-                if not os.path.exists(fpath):
-                    _append_log("error", f"✗ Script not found: {fpath}")
-                    continue
+#             for fname, label in RELOAD_SCRIPTS:
+#                 fpath = os.path.join(WORKSHOP_DIR, fname)
+#                 if not os.path.exists(fpath):
+#                     _append_log("error", f"✗ Script not found: {fpath}")
+#                     continue
 
-                _append_log("step", f"▶ [{label}]  psql -d {DB['dbname']} -f {fname}")
-                t0 = time.time()
-                try:
-                    proc = subprocess.Popen(
-                        ["psql", "-d", DB["dbname"], "-U", DB["user"], "-f", fpath,
-                         "-v", "ON_ERROR_STOP=0"],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        cwd=WORKSHOP_DIR,
-                    )
-                    for line in proc.stdout:
-                        line = line.rstrip()
-                        if not line:
-                            continue
-                        lvl = "log"
-                        if "ERROR" in line or "FATAL" in line:
-                            lvl = "error"
-                        elif "NOTICE" in line or "WARNING" in line:
-                            lvl = "notice"
-                        elif any(line.startswith(k) for k in
-                                 ("INSERT","CREATE","DROP","ANALYZE","TRUNCATE","UPDATE","SELECT")):
-                            lvl = "ok"
-                        _append_log(lvl, line)
-                    proc.wait()
-                    elapsed = round(time.time() - t0, 1)
-                    if proc.returncode == 0:
-                        _append_log("ok", f"✓ {fname} completed in {elapsed}s")
-                    else:
-                        _append_log("error", f"✗ {fname} exited with code {proc.returncode} ({elapsed}s)")
-                except Exception as e:
-                    _append_log("error", f"✗ Failed to run {fname}: {e}")
+#                 _append_log("step", f"▶ [{label}]  psql -d {DB['dbname']} -f {fname}")
+#                 t0 = time.time()
+#                 try:
+#                     proc = subprocess.Popen(
+#                         ["psql", "-d", DB["dbname"], "-U", DB["user"], "-f", fpath,
+#                          "-v", "ON_ERROR_STOP=0"],
+#                         stdout=subprocess.PIPE,
+#                         stderr=subprocess.STDOUT,
+#                         text=True,
+#                         cwd=WORKSHOP_DIR,
+#                     )
+#                     for line in proc.stdout:
+#                         line = line.rstrip()
+#                         if not line:
+#                             continue
+#                         lvl = "log"
+#                         if "ERROR" in line or "FATAL" in line:
+#                             lvl = "error"
+#                         elif "NOTICE" in line or "WARNING" in line:
+#                             lvl = "notice"
+#                         elif any(line.startswith(k) for k in
+#                                  ("INSERT","CREATE","DROP","ANALYZE","TRUNCATE","UPDATE","SELECT")):
+#                             lvl = "ok"
+#                         _append_log(lvl, line)
+#                     proc.wait()
+#                     elapsed = round(time.time() - t0, 1)
+#                     if proc.returncode == 0:
+#                         _append_log("ok", f"✓ {fname} completed in {elapsed}s")
+#                     else:
+#                         _append_log("error", f"✗ {fname} exited with code {proc.returncode} ({elapsed}s)")
+#                 except Exception as e:
+#                     _append_log("error", f"✗ Failed to run {fname}: {e}")
 
-                if not _reload_running:
-                    _append_log("error", "⚠ Reload aborted — stopping before next script")
-                    break
+#                 if not _reload_running:
+#                     _append_log("error", "⚠ Reload aborted — stopping before next script")
+#                     break
 
-            total = round(time.time() - t_total, 1)
-            if _reload_running:
-                _append_log("done", f"🎉 Full reload complete in {total}s — ~50M rows (Jan–Apr 2026), pgvector embeddings, MADlib features & K-Means assignments ready")
-        finally:
-            _reload_running = False
+#             total = round(time.time() - t_total, 1)
+#             if _reload_running:
+#                 _append_log("done", f"🎉 Full reload complete in {total}s — ~50M rows (Jan–Apr 2026), pgvector embeddings, MADlib features & K-Means assignments ready")
+#         finally:
+#             _reload_running = False
 
-    threading.Thread(target=_run, daemon=True).start()
-    return jsonify({"ok": True, "msg": "Reload started"})
-
-
-@app.route("/api/reload/status")
-def api_reload_status():
-    return jsonify({"running": _reload_running, "log": _reload_log})
+#     threading.Thread(target=_run, daemon=True).start()
+#     return jsonify({"ok": True, "msg": "Reload started"})
 
 
-@app.route("/api/reload/abort", methods=["POST"])
-def api_reload_abort():
-    global _reload_running
-    _reload_running = False
-    _append_log("error", "⚠ Reload aborted by user — current script may still finish")
-    return jsonify({"ok": True})
+# @app.route("/api/reload/status")
+# def api_reload_status():
+#     return jsonify({"running": _reload_running, "log": _reload_log})
+
+
+# @app.route("/api/reload/abort", methods=["POST"])
+# def api_reload_abort():
+#     global _reload_running
+#     _reload_running = False
+#     _append_log("error", "⚠ Reload aborted by user — current script may still finish")
+#     return jsonify({"ok": True})
 
 
 @app.route("/")
 def index():
     return render_template_string(
         HTML, panels=PANELS, queries=QUERIES,
-        reload_scripts=RELOAD_SCRIPTS, workshop_dir=WORKSHOP_DIR
+        # reload_scripts=RELOAD_SCRIPTS, workshop_dir=WORKSHOP_DIR
     )
 
 
@@ -543,62 +543,7 @@ tr:last-child td{border-bottom:none}
         cursor:pointer;font-family:inherit;margin-top:10px;transition:.15s}
 .runbtn:hover{opacity:.85}
 
-/* ── RELOAD PANEL ── */
-.reload-card{background:var(--card);border:1px solid var(--border);border-radius:12px;
-             overflow:hidden;margin-bottom:14px}
-.reload-hdr{background:#0f172a;padding:18px 22px;display:flex;align-items:center;
-            justify-content:space-between;gap:14px;flex-wrap:wrap}
-.reload-title{color:#e2e8f0;font-size:16px;font-weight:700}
-.reload-sub{color:#94a3b8;font-size:12px;margin-top:2px}
-.reload-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-.btn-reload{background:linear-gradient(135deg,#d97706,#b45309);color:#fff;border:0;
-            padding:10px 24px;border-radius:8px;font-size:13px;font-weight:700;
-            cursor:pointer;font-family:inherit;transition:.15s;white-space:nowrap}
-.btn-reload:hover{opacity:.88}.btn-reload:disabled{opacity:.4;cursor:not-allowed}
-.btn-abort{background:var(--ddim);color:var(--danger);border:1px solid rgba(239,68,68,.3);
-           padding:8px 16px;border-radius:8px;font-size:12px;font-weight:600;
-           cursor:pointer;font-family:inherit;transition:.15s}
-.btn-abort:hover{background:rgba(239,68,68,.2)}.btn-abort:disabled{opacity:.4;cursor:not-allowed}
 
-.reload-body{padding:20px 22px}
-.reload-steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
-              gap:10px;margin-bottom:18px}
-.step-card{background:var(--bg);border:1px solid var(--border);border-radius:8px;
-           padding:12px 14px;transition:.2s}
-.step-card.active{border-color:var(--warn);background:var(--wdim)}
-.step-card.done{border-color:var(--accent);background:var(--adim)}
-.step-card.error{border-color:var(--danger);background:var(--ddim)}
-.step-num{font-family:'Courier New',monospace;font-size:10px;font-weight:700;
-          color:var(--dim);margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em}
-.step-name{font-size:12px;font-weight:600}
-.step-file{font-family:'Courier New',monospace;font-size:11px;color:var(--muted);margin-top:2px}
-.step-status{font-size:10px;font-weight:600;margin-top:5px}
-.step-status.idle{color:var(--dim)}.step-status.active{color:var(--warn)}
-.step-status.done{color:var(--accent)}.step-status.error{color:var(--danger)}
-
-/* log box */
-.logbox{background:#0d1117;border:1px solid #30363d;border-radius:8px;
-        height:340px;overflow-y:auto;padding:12px 14px;
-        font-family:'Courier New',monospace;font-size:11px;line-height:1.7}
-.log-line{display:flex;gap:10px;padding:1px 0;border-bottom:1px solid rgba(255,255,255,.03)}
-.log-ts{color:#484f58;min-width:60px;flex-shrink:0}
-.log-msg{flex:1;word-break:break-all}
-.log-info   .log-msg{color:#8b949e}
-.log-step   .log-msg{color:#79c0ff;font-weight:600}
-.log-ok     .log-msg{color:#3fb950}
-.log-notice .log-msg{color:#d29922}
-.log-error  .log-msg{color:#f85149}
-.log-done   .log-msg{color:#58a6ff;font-weight:700;font-size:12px}
-.log-log    .log-msg{color:#8b949e}
-
-.reload-status-bar{display:flex;align-items:center;gap:16px;flex-wrap:wrap;
-                   background:var(--bg);border:1px solid var(--border);
-                   border-radius:8px;padding:10px 14px;margin-bottom:12px}
-.rstat{font-size:12px;color:var(--dim)}
-.rstat strong{color:var(--text);font-family:'Courier New',monospace}
-.spin-ring{width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--warn);
-           border-radius:50%;animation:sp .7s linear infinite;display:none;flex-shrink:0}
-.spin-ring.active{display:inline-block}
 
 /* ── footer ── */
 .ft{margin-top:32px;padding:14px 0;border-top:1px solid var(--border);
@@ -633,7 +578,6 @@ tr:last-child td{border-bottom:none}
   <button class="tab"     onclick="switchTab(1)">Part B: MADlib / SQL</button>
   <button class="tab"     onclick="switchTab(2)">Part C: AI Factory</button>
   <button class="tab"     onclick="switchTab(3)" style="border-color:rgba(167,139,250,.3);color:var(--purple)">SQL Editor</button>
-  <button class="tab reload-tab" onclick="switchTab(4)" id="tab-reload">⟳ Data Reload</button>
 </div>
 
 <div class="main" id="main">
@@ -1020,8 +964,6 @@ if __name__ == "__main__":
 ║  Lab 3 — AI Analytics Dashboard (LIVE)              ║
 ║  DB: {DB['host']}:{DB['port']}/{DB['dbname']}
 ║  Queries: {len(QUERIES)} across {len(PANELS)} panels
-║  Workshop: {WORKSHOP_DIR}
-║  Data: Jan 1 – Apr 23 2026  (~50M rows)             ║
 ║  Data: Jan 1 – Apr 23 2026  (~50M rows)             ║
 ║  http://0.0.0.0:5002                                ║
 ╚══════════════════════════════════════════════════════╝

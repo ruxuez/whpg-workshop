@@ -46,7 +46,7 @@ CREATE READABLE EXTERNAL TABLE ext_netflow_logs (
     output_if       TEXT,
     sampler_id      TEXT,
     region_id       INT
-) LOCATION ('gpfdist://localhost:8081/netflow_logs.csv')
+) LOCATION ('gpfdist://cdw:8081/netflow_logs.csv.gz')
 FORMAT 'CSV'
 LOG ERRORS SEGMENT REJECT LIMIT 1000;
 
@@ -62,7 +62,7 @@ CREATE READABLE EXTERNAL TABLE ext_dns_logs (
     response_time   INT,
     is_recursive    TEXT,
     region_id       INT
-) LOCATION ('gpfdist://localhost:8081/dns_logs.csv')
+) LOCATION ('gpfdist://cdw:8081/dns_logs.csv.gz')
 FORMAT 'CSV'
 LOG ERRORS SEGMENT REJECT LIMIT 1000;
 
@@ -81,7 +81,7 @@ CREATE READABLE EXTERNAL TABLE ext_firewall_logs (
     zone_src        VARCHAR(32),
     zone_dst        VARCHAR(32),
     region_id       INT
-) LOCATION ('gpfdist://localhost:8081/firewall_logs.csv')
+) LOCATION ('gpfdist://cdw:8081/firewall_logs.csv.gz')
 FORMAT 'CSV'
 LOG ERRORS SEGMENT REJECT LIMIT 1000;
 
@@ -96,7 +96,7 @@ CREATE READABLE EXTERNAL TABLE ext_syslog_events (
     program         VARCHAR(64),
     message         TEXT,
     region_id       INT
-) LOCATION ('gpfdist://localhost:8081/syslog_events.csv')
+) LOCATION ('gpfdist://cdw:8081/syslog_events.csv.gz')
 FORMAT 'CSV'
 LOG ERRORS SEGMENT REJECT LIMIT 1000;
 
@@ -114,7 +114,7 @@ CREATE READABLE EXTERNAL TABLE ext_bgp_events (
     med             INT,
     community       TEXT,
     region_id       INT
-) LOCATION ('gpfdist://localhost:8081/bgp_events.csv')
+) LOCATION ('gpfdist://cdw:8081/bgp_events.csv.gz')
 FORMAT 'CSV'
 LOG ERRORS SEGMENT REJECT LIMIT 1000;
 
@@ -130,7 +130,7 @@ CREATE READABLE EXTERNAL TABLE ext_network_metrics (
     packet_loss_pct NUMERIC(5,2),
     throughput_mbps NUMERIC(10,2),
     mos_score       NUMERIC(3,1)
-) LOCATION ('gpfdist://localhost:8081/network_metrics.csv')
+) LOCATION ('gpfdist://cdw:8081/network_metrics.csv.gz')
 FORMAT 'CSV'
 LOG ERRORS SEGMENT REJECT LIMIT 1000;
 
@@ -378,26 +378,26 @@ WHERE t.active = TRUE;
 -- ║  STEP 5: ANALYZE + Final Report                                            ║
 -- ╚══════════════════════════════════════════════════════════════════════════════╝
 
-DO $$ BEGIN RAISE NOTICE '[%] Running ANALYZE...', clock_timestamp(); END $$;
+-- DO $$ BEGIN RAISE NOTICE '[%] Running ANALYZE...', clock_timestamp(); END $$;
 
-ANALYZE netvista_demo.netflow_logs;
-ANALYZE netvista_demo.dns_logs;
-ANALYZE netvista_demo.firewall_logs;
-ANALYZE netvista_demo.syslog_events;
-ANALYZE netvista_demo.bgp_events;
-ANALYZE netvista_demo.network_metrics;
-ANALYZE netvista_demo.ipam_allocations;
-ANALYZE netvista_demo.ipam_summary;
-ANALYZE netvista_demo.security_incidents;
+-- ANALYZE netvista_demo.netflow_logs;
+-- ANALYZE netvista_demo.dns_logs;
+-- ANALYZE netvista_demo.firewall_logs;
+-- ANALYZE netvista_demo.syslog_events;
+-- ANALYZE netvista_demo.bgp_events;
+-- ANALYZE netvista_demo.network_metrics;
+-- ANALYZE netvista_demo.ipam_allocations;
+-- ANALYZE netvista_demo.ipam_summary;
+-- ANALYZE netvista_demo.security_incidents;
 
 DO $$
 DECLARE
     r RECORD;
     total BIGINT := 0;
 BEGIN
-    RAISE NOTICE '';
+    RAISE NOTICE U&'\00A0';
     RAISE NOTICE '╔══════════════════════════════════════════════════════════════╗';
-    RAISE NOTICE '║  EXTERNAL TABLE LOAD COMPLETE                              ║';
+    RAISE NOTICE '║  EXTERNAL TABLE LOAD COMPLETE                                ║';
     RAISE NOTICE '╠══════════════════════════════════════════════════════════════╣';
     FOR r IN
         SELECT 'netflow_logs'        AS tbl, COUNT(*) AS cnt FROM netvista_demo.netflow_logs
@@ -412,10 +412,10 @@ BEGIN
         ORDER BY 2 DESC
     LOOP
         total := total + r.cnt;
-        RAISE NOTICE '║  % : % rows  ║', RPAD(r.tbl, 22), LPAD(TO_CHAR(r.cnt, '99,999,999'), 12);
+        RAISE NOTICE '║  % : % rows  ║', RPAD(r.tbl, 22), LPAD(TO_CHAR(r.cnt, '99,999,999'), 28);
     END LOOP;
     RAISE NOTICE '╠══════════════════════════════════════════════════════════════╣';
-    RAISE NOTICE '║  TOTAL                         : % rows  ║', LPAD(TO_CHAR(total, '99,999,999'), 12);
+    RAISE NOTICE '║  TOTAL                  : % rows  ║', LPAD(TO_CHAR(total, '99,999,999'), 28);
     RAISE NOTICE '╚══════════════════════════════════════════════════════════════╝';
 END $$;
 

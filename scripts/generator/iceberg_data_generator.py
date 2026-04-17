@@ -456,33 +456,6 @@ UNION ALL SELECT 'events', COUNT(*) FROM events_iceberg
 ORDER BY 2 DESC;
 """
 
-# def optimize_tables(catalog, table_names):
-#     """
-#     Manually compacts tables by reading all data and overwriting the table,
-#     then expires old snapshots to clean up metadata.
-#     """
-#     print(f"\n[5/5] Optimizing Iceberg tables (Manual Compaction & Cleanup)...")
-#     for name in table_names:
-#         full_name = f"{NAMESPACE}.{name}"
-#         try:
-#             print(f"  Compacting {name}...")
-#             table = catalog.load_table(full_name)
-            
-#             # 1. Manual Compaction: Read all data into memory/Arrow and overwrite
-#             # This forces Iceberg to write out new, optimized Parquet files
-#             all_data = table.scan().to_arrow()
-#             table.overwrite(all_data)
-            
-#             # 2. Cleanup: Expire old snapshots (This IS supported in PyIceberg)
-#             import time
-#             now_ms = int(time.time() * 1000)
-#             table.expire_snapshots(older_than_ms=now_ms, retain_last=1)
-            
-#             print(f"    ✓ {name} optimized (files consolidated)")
-#         except Exception as e:
-#             print(f"    ✗ {name} optimization failed: {e}")
-
-
 
 # ═════════════════════════════════════════════════════════════════════════════
 # MAIN

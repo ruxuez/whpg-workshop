@@ -27,23 +27,23 @@ DB = {
 }
 
 # ── Reload scripts (in order) ───────────────────────────────────────────────
-WORKSHOP_DIR = os.environ.get("WORKSHOP_DIR", "/home/gpadmin/workshop")
+WORKSHOP_DIR = os.environ.get("WORKSHOP_DIR", "/scripts/sql/")
 RELOAD_SCRIPTS = [
     ("01_schema.sql",            "Drop & recreate schema"),
     ("02_seed_reference.sql",    "Seed reference tables"),
-    ("03_seed_traffic.sql",      "Seed traffic data (~50M rows, Jan-Apr 2026)"),
+    ("03_load_external.sql",      "Seed traffic data (~50M rows, Jan-Apr 2026)"),
     ("06_ai_analytics.sql",      "Build AI / pgvector analytics"),
     ("07_kmeans_fallback.sql",   "K-Means assignments (MADlib or SQL fallback)"),
 ]
 
-# Global reload state so the SSE stream can follow it
-_reload_lock   = threading.Lock()
-_reload_running = False
-_reload_log    = []   # list of (ts, level, msg)
+# # Global reload state so the SSE stream can follow it
+# _reload_lock   = threading.Lock()
+# _reload_running = False
+# _reload_log    = []   # list of (ts, level, msg)
 
-def _append_log(level, msg):
-    ts = datetime.now().strftime("%H:%M:%S")
-    _reload_log.append((ts, level, msg))
+# def _append_log(level, msg):
+#     ts = datetime.now().strftime("%H:%M:%S")
+#     _reload_log.append((ts, level, msg))
 
 # ── DB helper ───────────────────────────────────────────────────────────────
 def run(sql, params=None):
@@ -344,95 +344,96 @@ def api_sql():
 
 # ── Data Reload ──────────────────────────────────────────────────────────────
 
-@app.route("/api/reload/start", methods=["POST"])
-def api_reload_start():
-    global _reload_running, _reload_log
-    with _reload_lock:
-        if _reload_running:
-            return jsonify({"ok": False, "msg": "Reload already in progress"}), 409
-        _reload_running = True
-        _reload_log = []
+# @app.route("/api/reload/start", methods=["POST"])
+# def api_reload_start():
+#     global _reload_running, _reload_log
+#     with _reload_lock:
+#         if _reload_running:
+#             return jsonify({"ok": False, "msg": "Reload already in progress"}), 409
+#         _reload_running = True
+#         _reload_log = []
 
-    def _run():
-        global _reload_running
-        try:
-            _append_log("info", f"Starting full data reload in {WORKSHOP_DIR}")
-            _append_log("info", f"Running {len(RELOAD_SCRIPTS)} scripts sequentially")
-            t_total = time.time()
+#     def _run():
+#         global _reload_running
+#         try:
+#             _append_log("info", f"Starting full data reload in {WORKSHOP_DIR}")
+#             _append_log("info", f"Running {len(RELOAD_SCRIPTS)} scripts sequentially")
+#             t_total = time.time()
 
-            for fname, label in RELOAD_SCRIPTS:
-                fpath = os.path.join(WORKSHOP_DIR, fname)
-                if not os.path.exists(fpath):
-                    _append_log("error", f"✗ Script not found: {fpath}")
-                    continue
+#             for fname, label in RELOAD_SCRIPTS:
+#                 fpath = os.path.join(WORKSHOP_DIR, fname)
+#                 if not os.path.exists(fpath):
+#                     _append_log("error", f"✗ Script not found: {fpath}")
+#                     continue
 
-                _append_log("step", f"▶ [{label}]  psql -d gpadmin -f {fname}")
-                t0 = time.time()
-                try:
-                    proc = subprocess.Popen(
-                        ["psql", "-d", DB["dbname"], "-U", DB["user"], "-f", fpath,
-                         "-v", "ON_ERROR_STOP=0"],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        cwd=WORKSHOP_DIR,
-                    )
-                    for line in proc.stdout:
-                        line = line.rstrip()
-                        if line:
-                            # classify line
-                            lvl = "log"
-                            if "ERROR" in line or "FATAL" in line:
-                                lvl = "error"
-                            elif "NOTICE" in line or "WARNING" in line:
-                                lvl = "notice"
-                            elif line.startswith("INSERT") or line.startswith("CREATE") \
-                                    or line.startswith("DROP") or line.startswith("ANALYZE") \
-                                    or line.startswith("TRUNCATE"):
-                                lvl = "ok"
-                            _append_log(lvl, line)
-                    proc.wait()
-                    elapsed = round(time.time() - t0, 1)
-                    if proc.returncode == 0:
-                        _append_log("ok", f"✓ {fname} completed in {elapsed}s")
-                    else:
-                        _append_log("error", f"✗ {fname} exited with code {proc.returncode} ({elapsed}s)")
-                except Exception as e:
-                    _append_log("error", f"✗ Failed to run {fname}: {e}")
+#                 _append_log("step", f"▶ [{label}]  psql -d gpadmin -f {fname}")
+#                 t0 = time.time()
+#                 try:
+#                     proc = subprocess.Popen(
+#                         ["psql", "-d", DB["dbname"], "-U", DB["user"], "-f", fpath,
+#                          "-v", "ON_ERROR_STOP=0"],
+#                         stdout=subprocess.PIPE,
+#                         stderr=subprocess.STDOUT,
+#                         text=True,
+#                         cwd=WORKSHOP_DIR,
+#                     )
+#                     for line in proc.stdout:
+#                         line = line.rstrip()
+#                         if line:
+#                             # classify line
+#                             lvl = "log"
+#                             if "ERROR" in line or "FATAL" in line:
+#                                 lvl = "error"
+#                             elif "NOTICE" in line or "WARNING" in line:
+#                                 lvl = "notice"
+#                             elif line.startswith("INSERT") or line.startswith("CREATE") \
+#                                     or line.startswith("DROP") or line.startswith("ANALYZE") \
+#                                     or line.startswith("TRUNCATE"):
+#                                 lvl = "ok"
+#                             _append_log(lvl, line)
+#                     proc.wait()
+#                     elapsed = round(time.time() - t0, 1)
+#                     if proc.returncode == 0:
+#                         _append_log("ok", f"✓ {fname} completed in {elapsed}s")
+#                     else:
+#                         _append_log("error", f"✗ {fname} exited with code {proc.returncode} ({elapsed}s)")
+#                 except Exception as e:
+#                     _append_log("error", f"✗ Failed to run {fname}: {e}")
 
-            total_elapsed = round(time.time() - t_total, 1)
-            _append_log("done", f"🎉 Full reload complete in {total_elapsed}s — ~50M rows loaded (Jan–Apr 2026)")
-        finally:
-            _reload_running = False
+#             total_elapsed = round(time.time() - t_total, 1)
+#             _append_log("done", f"🎉 Full reload complete in {total_elapsed}s — ~50M rows loaded (Jan–Apr 2026)")
+#         finally:
+#             _reload_running = False
 
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
-    return jsonify({"ok": True, "msg": "Reload started"})
-
-
-@app.route("/api/reload/status")
-def api_reload_status():
-    """Returns current log + running flag — polled by the UI every 1s."""
-    return jsonify({
-        "running": _reload_running,
-        "log": _reload_log,   # list of [ts, level, msg]
-    })
+#     t = threading.Thread(target=_run, daemon=True)
+#     t.start()
+#     return jsonify({"ok": True, "msg": "Reload started"})
 
 
-@app.route("/api/reload/abort", methods=["POST"])
-def api_reload_abort():
-    # We can't kill a running psql cleanly, but we can flip the flag
-    global _reload_running
-    _reload_running = False
-    _append_log("error", "⚠ Reload aborted by user — current script may still be running")
-    return jsonify({"ok": True})
+# @app.route("/api/reload/status")
+# def api_reload_status():
+#     """Returns current log + running flag — polled by the UI every 1s."""
+#     return jsonify({
+#         "running": _reload_running,
+#         "log": _reload_log,   # list of [ts, level, msg]
+#     })
+
+
+# @app.route("/api/reload/abort", methods=["POST"])
+# def api_reload_abort():
+#     # We can't kill a running psql cleanly, but we can flip the flag
+#     global _reload_running
+#     _reload_running = False
+#     _append_log("error", "⚠ Reload aborted by user — current script may still be running")
+#     return jsonify({"ok": True})
 
 
 @app.route("/")
 def index():
     return render_template_string(HTML, panels=PANELS, queries=QUERIES,
                                   reload_scripts=RELOAD_SCRIPTS,
-                                  workshop_dir=WORKSHOP_DIR)
+                                  workshop_dir=WORKSHOP_DIR
+                                  )
 
 
 # ── HTML template ────────────────────────────────────────────────────────────
@@ -651,7 +652,6 @@ tr:last-child td{border-bottom:none}
   <button class="tab"    onclick="switchTab(2)">IPAM &amp; SLA</button>
   <button class="tab"    onclick="switchTab(3)">Security</button>
   <button class="tab"    onclick="switchTab(4)" style="margin-left:4px;border-color:rgba(167,139,250,.3);color:var(--purple)">SQL Editor</button>
-  <button class="tab reload-tab" onclick="switchTab(5)" id="tab-reload">⟳ Data Reload</button>
 </div>
 
 <div class="main" id="main">
@@ -662,101 +662,27 @@ tr:last-child td{border-bottom:none}
   <div class="pnl" id="pnl-4">
     <div class="sec-hdr">
       <span class="n">Q</span><h2>SQL Editor</h2>
-      <div class="d">Run any SELECT against the live 95.8M row dataset</div>
+      <div class="d">Run any SELECT against the live 50M row dataset</div>
     </div>
-    <textarea class="sqled" id="sqlin" spellcheck="false">SELECT src_ip::text, dst_ip::text, dst_port,
-    SUM(bytes) AS total_bytes, COUNT(*) AS flow_count
-FROM netflow_logs
-WHERE src_ip <<= '10.128.0.0/16'::cidr
-  AND ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59'
-GROUP BY 1, 2, 3 ORDER BY total_bytes DESC LIMIT 20;</textarea>
+    <textarea class="sqled" id="sqlin" spellcheck="false">
+SELECT
+    n.nspname,
+    c.relname,
+    CASE WHEN c.relkind = 'p' THEN 'Partitioned Root' ELSE 'Standard Table' END as type
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'netvista_demo'
+  AND c.relkind IN ('r', 'p')
+  AND c.relispartition = false;
+  </textarea>
     <button class="runbtn" onclick="runSQL()">▶ Run Query</button>
     <span id="sqlt" style="margin-left:12px"></span>
     <div style="margin-top:14px;overflow-x:auto;max-height:500px;overflow-y:auto;border-radius:8px" id="sqlr"></div>
   </div>
 
-  <!-- DATA RELOAD panel -->
-  <div class="pnl" id="pnl-5">
-    <div class="sec-hdr">
-      <span class="n" style="background:linear-gradient(135deg,var(--warn),#b45309)">↺</span>
-      <h2>Data Reload</h2>
-      <div class="d">Re-runs all 4 SQL scripts to refresh timestamps to <em>now()</em> — fixes "last 6 hours" filter</div>
-    </div>
-
-    <!-- Main reload card -->
-    <div class="reload-card">
-      <div class="reload-hdr">
-        <div>
-          <div class="reload-title">Full Dataset Reload</div>
-          <div class="reload-sub">{{ workshop_dir }} — drops schema, reseeds, loads ~50M rows (Jan–Apr 2026), rebuilds AI analytics</div>
-        </div>
-        <div class="reload-actions">
-          <div class="progress-ring" id="reload-spinner"></div>
-          <button class="btn-reload" id="btn-reload" onclick="startReload()">⟳ Start Reload</button>
-          <button class="btn-abort"  id="btn-abort"  onclick="abortReload()" disabled>✕ Abort</button>
-        </div>
-      </div>
-
-      <div class="reload-body">
-        <!-- Status bar -->
-        <div class="reload-status-bar">
-          <div class="rstat">Status: <strong id="rstat-txt">Idle</strong></div>
-          <div class="rstat">Steps: <strong id="rstat-step">—</strong></div>
-          <div class="rstat">Elapsed: <strong id="rstat-elapsed">—</strong></div>
-        </div>
-
-        <!-- Step cards -->
-        <div class="reload-steps" id="reload-steps">
-          {% for fname, label in reload_scripts %}
-          <div class="step-card" id="step-{{ loop.index0 }}">
-            <div class="step-num">Step {{ loop.index }}</div>
-            <div class="step-name">{{ label }}</div>
-            <div class="step-file">{{ fname }}</div>
-            <div class="step-status idle" id="step-st-{{ loop.index0 }}">Waiting</div>
-          </div>
-          {% endfor %}
-        </div>
-
-        <!-- Log box -->
-        <div style="font-size:11px;color:var(--dim);margin-bottom:6px;
-                    display:flex;justify-content:space-between;align-items:center">
-          <span>Live output</span>
-          <button onclick="clearLog()" style="background:0;border:0;color:var(--dim);
-                  cursor:pointer;font-size:11px;font-family:inherit">Clear</button>
-        </div>
-        <div class="logbox" id="reload-log">
-          <div class="log-line log-info">
-            <span class="log-ts">--:--:--</span>
-            <span class="log-msg">Ready — click "Start Reload" to refresh all data to current timestamps.</span>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Info card -->
-    <div style="background:var(--card);border:1px solid var(--border);border-radius:12px;padding:18px 22px">
-      <div style="font-weight:600;margin-bottom:10px;font-size:14px">What this does</div>
-      <div style="font-size:13px;color:var(--muted);line-height:1.8">
-        All queries filter for <code style="background:var(--bg);padding:1px 5px;border-radius:3px;font-family:'JetBrains Mono',monospace">ts &gt; now() - interval '6 hours'</code> (or 24h).
-        Data spans <strong>Jan 1 – Apr 23 2026</strong> across 113 daily partitions. Queries use fixed date range filters so results are always available.<br><br>
-        This reload drops and recreates the schema, reseeds reference tables, inserts ~50M rows
-        across the full Jan–Apr 2026 window, and rebuilds the pgvector embeddings table.
-        It takes approximately <strong>3–5 minutes</strong>.
-      </div>
-      <div style="margin-top:14px;display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px">
-        {% for fname, label in reload_scripts %}
-        <div style="background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:10px 12px">
-          <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--accent);margin-bottom:3px">{{ fname }}</div>
-          <div style="font-size:12px;font-weight:500">{{ label }}</div>
-        </div>
-        {% endfor %}
-      </div>
-    </div>
-  </div>
-
   <div class="ft">
     <div>EDB WarehousePG — Native network types + MPP parallel engine</div>
-    <div style="font-family:'JetBrains Mono',monospace" id="ftr">95.8M rows | 7 regions</div>
+    <div style="font-family:'JetBrains Mono',monospace" id="ftr">50M rows | 7 regions</div>
   </div>
 </div><!-- /main -->
 
@@ -1070,8 +996,6 @@ if __name__ == "__main__":
 ║  NetVista × WarehousePG — Network Analytics Demo    ║
 ║  DB: {DB['host']}:{DB['port']}/{DB['dbname']}
 ║  Queries: {len(QUERIES)} across {len(PANELS)} panels
-║  Workshop: {WORKSHOP_DIR}
-║  Data: Jan 1 – Apr 23 2026  (~50M rows)             ║
 ║  Data: Jan 1 – Apr 23 2026  (~50M rows)             ║
 ║  http://0.0.0.0:5001                                ║
 ╚══════════════════════════════════════════════════════╝
