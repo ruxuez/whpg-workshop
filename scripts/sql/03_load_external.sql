@@ -164,7 +164,7 @@ TRUNCATE network_metrics;
 -- The offset is: now() - max(ts) from the external table → shift all rows forward.
 
 -- ── Netflow ─────────────────────────────────────────────────────────────────
-DO $$ BEGIN RAISE NOTICE '[%] Loading netflow_logs (~33M rows)...', clock_timestamp(); END $$;
+DO $$ BEGIN RAISE NOTICE '[%] Loading netflow_logs (~15.8M rows)...', clock_timestamp(); END $$;
 
 INSERT INTO netflow_logs (flow_id, ts, src_ip, dst_ip, src_port, dst_port, protocol,
                           bytes, packets, tcp_flags, flow_duration,
@@ -192,7 +192,7 @@ FROM ext_netflow_logs;
 DO $$ BEGIN RAISE NOTICE '[%] netflow_logs loaded.', clock_timestamp(); END $$;
 
 -- ── DNS ─────────────────────────────────────────────────────────────────────
-DO $$ BEGIN RAISE NOTICE '[%] Loading dns_logs (~25M rows)...', clock_timestamp(); END $$;
+DO $$ BEGIN RAISE NOTICE '[%] Loading dns_logs (~12.5M rows)...', clock_timestamp(); END $$;
 
 INSERT INTO dns_logs (dns_id, ts, client_ip, query_name, query_type, response_code,
                       response_ip, response_time, is_recursive, region_id)
@@ -212,7 +212,7 @@ FROM ext_dns_logs;
 DO $$ BEGIN RAISE NOTICE '[%] dns_logs loaded.', clock_timestamp(); END $$;
 
 -- ── Firewall ────────────────────────────────────────────────────────────────
-DO $$ BEGIN RAISE NOTICE '[%] Loading firewall_logs (~22.5M rows)...', clock_timestamp(); END $$;
+DO $$ BEGIN RAISE NOTICE '[%] Loading firewall_logs (~11.2M rows)...', clock_timestamp(); END $$;
 
 INSERT INTO firewall_logs (fw_id, ts, src_ip, dst_ip, src_port, dst_port, protocol,
                            action, rule_id, bytes, zone_src, zone_dst, region_id)
@@ -235,7 +235,7 @@ FROM ext_firewall_logs;
 DO $$ BEGIN RAISE NOTICE '[%] firewall_logs loaded.', clock_timestamp(); END $$;
 
 -- ── Syslog ──────────────────────────────────────────────────────────────────
-DO $$ BEGIN RAISE NOTICE '[%] Loading syslog_events (~15M rows)...', clock_timestamp(); END $$;
+DO $$ BEGIN RAISE NOTICE '[%] Loading syslog_events (~7.5M rows)...', clock_timestamp(); END $$;
 
 INSERT INTO syslog_events (event_id, ts, src_ip, hostname, facility, severity,
                            program, message, region_id)
@@ -254,7 +254,7 @@ FROM ext_syslog_events;
 DO $$ BEGIN RAISE NOTICE '[%] syslog_events loaded.', clock_timestamp(); END $$;
 
 -- ── BGP ─────────────────────────────────────────────────────────────────────
-DO $$ BEGIN RAISE NOTICE '[%] Loading bgp_events (~1.5M rows)...', clock_timestamp(); END $$;
+DO $$ BEGIN RAISE NOTICE '[%] Loading bgp_events (~752 rows)...', clock_timestamp(); END $$;
 
 INSERT INTO bgp_events (bgp_id, ts, peer_ip, prefix, event_type, as_path,
                         next_hop, origin, local_pref, med, community, region_id)
@@ -276,7 +276,7 @@ FROM ext_bgp_events;
 DO $$ BEGIN RAISE NOTICE '[%] bgp_events loaded.', clock_timestamp(); END $$;
 
 -- ── Network Metrics ─────────────────────────────────────────────────────────
-DO $$ BEGIN RAISE NOTICE '[%] Loading network_metrics (~150K rows)...', clock_timestamp(); END $$;
+DO $$ BEGIN RAISE NOTICE '[%] Loading network_metrics (~2.4M rows)...', clock_timestamp(); END $$;
 
 INSERT INTO network_metrics (metric_id, ts, customer_id, region_id, probe_ip,
                              latency_ms, jitter_ms, packet_loss_pct,
