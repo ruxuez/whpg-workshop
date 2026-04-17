@@ -175,6 +175,7 @@ RUN /usr/bin/python3.9 -m pip install --upgrade pip && \
     flask \
     psycopg2-binary \
     "pyiceberg[sql-sqlite,pyiceberg-core]" && \
+    pandas plotly dash dash-bootstrap-components \
     /usr/bin/python3.9 -m pip install pyarrow --only-binary=:all:
 
 # USER gpadmin
