@@ -110,14 +110,14 @@ echo "PGAA Version:"
 psql -P pager=off -d demo -c 'SELECT pgaa.pgaa_version()'
 
 echo ""
-echo "Installed Extensions:"
-psql -P pager=off -d demo -c '\dx'
-
-echo ""
 echo "Installing PGVECTOR..."
 
 # Step 1: Create extension VECTOR
 psql -d demo -c 'CREATE EXTENSION IF NOT EXISTS vector CASCADE'
+
+echo ""
+echo "Installed Extensions:"
+psql -P pager=off -d demo -c '\dx'
 
 echo ""
 echo "Configuring MADLIB..."
