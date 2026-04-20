@@ -156,7 +156,7 @@ WantedBy=multi-user.target\n' > /etc/systemd/system/whpg-start.service && \
 
 
 RUN --mount=type=secret,id=repo_token bash -c 'ls /run/secrets && curl -1Lf https://downloads.enterprisedb.com/$(cat /run/secrets/repo_token)/dev/setup.rpm.sh | sudo bash'
-RUN dnf -y install edb-whpg7-pgaa-1.8.0-13-g7d69b163-0.0snapshot24335726074.763.1.7d69b16-1.el8
+RUN dnf -y install edb-whpg7-pgaa-1.8.0-13-g7d69b163-0.0snapshot24335726074.763.1.7d69b16-1.el8.x86_64
 
 # Remove EDB repo configs so no token or repo URL leaks into image layers
 RUN rm -f /etc/yum.repos.d/enterprisedb-*.repo \
