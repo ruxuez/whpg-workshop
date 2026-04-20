@@ -1,21 +1,21 @@
-# Analytics Database (WarehousePG + PGAA)
+# Analytics Database (WarehousePG + PGAA + PgVector + MADlib)
 
-Multi-node WarehousePG cluster with PGAA extension for querying Iceberg tables and Delta/Parquet files.
+Multi-node WarehousePG cluster with different Analytics and AI extentions.
 
 ## Architecture
 
 This setup creates a distributed WarehousePG cluster with:
 
 - **Coordinator** (`cdw`): Master node managing query planning and coordination
-- **Segment 1** (`sdw1`): Data processing node with 2 primary + 2 mirror segments
-- **Segment 2** (`sdw2`): Data processing node with 2 primary + 2 mirror segments
+- **Segment 1** (`sdw1`): Data processing node with 2 primary
+- **Segment 2** (`sdw2`): Data processing node with 2 primary
 
-Total: 4 primary segments and 4 mirror segments for high availability.
+Total: 4 primary segments. No mirrors for high availability.
 
 ## Prerequisites
 
 - EDB Subscription Token (set as environment variable)
-- Catalog component must be running (Lakekeeper + MinIO)
+- Catalog component must be running (MinIO)
 - Network: `converged-analytics-network` (created by catalog stack)
 
 ## Quick Start
@@ -24,8 +24,9 @@ Total: 4 primary segments and 4 mirror segments for high availability.
 
 ```bash
 cd analytics-db
+echo "EDB_SUBSCRIPTION_TOKEN=\"${EDB_SUBSCRIPTION_TOKEN}\"" > .env
 docker-compose build
-docker-compose up -d
+docker-compose up -d 
 ```
 
 ### 2. Monitor Startup
@@ -45,7 +46,12 @@ Wait for the "DEPLOYMENT SUCCESSFUL" banner.
 docker ps | grep -E "cdw|sdw"
 
 # Check cluster status
-docker exec cdw bash -ic "source /usr/local/greenplum-db/greenplum_path.sh && gpstate"
+docker exec -u gpadmin cdw \
+  bash -c " \
+    source /usr/local/greenplum-db/greenplum_path.sh && \
+    export COORDINATOR_DATA_DIRECTORY=/data/master/gpseg-1 && \
+    gpstate \
+"
 ```
 
 ### 4. Setup PGAA
@@ -89,90 +95,12 @@ From host machine:
 PGPASSWORD=changeme@123 psql -h localhost -p 5432 -U gpadmin -d demo
 ```
 
-## Schemas and Tables
-
-After running setup scripts:
-
-### demo schema (local Iceberg catalog)
-
-Managed by Lakekeeper catalog, tables replicated from PGD:
-
-- `demo.countries`
-- `demo.products`
-- `demo.customers`
-- `demo.sales`
-
-### sample_delta_tpch_sf_1 schema (public S3 Delta tables)
-
-Read-only Delta/Parquet tables from EDB public bucket:
-
-- `sample_delta_tpch_sf_1.customer`
-- `sample_delta_tpch_sf_1.lineitem`
-- `sample_delta_tpch_sf_1.nation`
-- `sample_delta_tpch_sf_1.orders`
-- `sample_delta_tpch_sf_1.part`
-- `sample_delta_tpch_sf_1.partsupp`
-- `sample_delta_tpch_sf_1.region`
-- `sample_delta_tpch_sf_1.supplier`
-
-## Querying with Different Engines
-
-PGAA supports multiple execution engines:
-
-### Datafusion (default - embedded)
-
-```sql
--- No configuration needed, automatically used by default
-SELECT COUNT(*) FROM sample_delta_tpch_sf_1.customer;
-```
-
-### Spark Connect (requires Spark cluster)
-
-```sql
--- Point to Spark Connect endpoint
-SET pgaa.executor_engine = 'spark_connect';
-SET pgaa.spark_connect_url = 'sc://spark-connect-host:15002';
-
-SELECT COUNT(*) FROM sample_delta_tpch_sf_1.customer;
-```
-
-## WarehousePG Specifics
-
-### Distributed Tables
-
-WarehousePG supports distributed tables for parallel query execution:
-
-```sql
--- Replicated (small dimension tables)
-CREATE TABLE demo.countries () USING PGAA WITH (...)
-DISTRIBUTED REPLICATED;
-
--- Distributed by hash (large fact tables)
-CREATE TABLE demo.sales () USING PGAA WITH (...)
-DISTRIBUTED BY (id);
-
--- Randomly distributed
-CREATE TABLE demo.products () USING PGAA WITH (...)
-DISTRIBUTED RANDOMLY;
-```
-
-### Cluster Information
-
-```sql
--- View segment configuration
-SELECT * FROM gp_segment_configuration ORDER BY dbid;
-
--- View cluster state
-\! source /usr/local/greenplum-db/greenplum_path.sh && gpstate
-```
 
 ## Volumes
 
 - **master**: Coordinator node data directory
 - **sdw1_primary1, sdw1_primary2**: Segment 1 primary data directories
-- **sdw1_mirror1, sdw1_mirror2**: Segment 1 mirror data directories
 - **sdw2_primary1, sdw2_primary2**: Segment 2 primary data directories
-- **sdw2_mirror1, sdw2_mirror2**: Segment 2 mirror data directories
 
 ## Troubleshooting
 
