@@ -1,290 +1,270 @@
-#!/usr/bin/env python3
 """
-NetVista K-Means Cluster Explorer — EDB Postgres AI Branded
-Single-file Dash App with WHPG Backend.
-Run: python3 dashboard.py
-Access: http://localhost:5003
+NetVista: AI Factory - K-Means Cluster Explorer
+===============================================
+Requirements:
+    pip install psycopg2-binary pandas plotly dash dash-bootstrap-components
+
+Usage:
+    python3.9 dashboard.py
 """
+
 import os
 import textwrap
 import pandas as pd
 import psycopg2
 import plotly.express as px
 import plotly.graph_objects as go
+from typing import Optional  # Required for Python 3.9 compatibility
 import dash
+from dash import dcc, html, Input, Output, dash_table
 import dash_bootstrap_components as dbc
-from dash import dcc, html, Input, Output, dash_table, State
-from typing import Optional
 
 # ─────────────────────────────────────────────
-# CONNECTION CONFIG
+# 1. CONNECTION CONFIG
 # ─────────────────────────────────────────────
 DB_CONFIG = {
     "host":     os.getenv("WPGHOST",   "localhost"),
     "port":     int(os.getenv("WPGPORT",   "5432")),
-    "dbname":   os.getenv("WPGDB",     "demo"),
+    "dbname":   os.getenv("WPGDB",     "netvista_demo"),
     "user":     os.getenv("WPGUSER",   "gpadmin"),
     "password": os.getenv("WPGPASS",   ""),
 }
 
+# Labels based on typical security behavioral clusters
 CLUSTER_LABELS = {
-    0: "Normal traffic",
-    1: "Port scan / recon",
-    2: "Data exfil candidate",
-    3: "C2 beaconing",
-    4: "DDoS amplifier",
+    0: "Standard Traffic",
+    1: "Recon / Port Scanning",
+    2: "Data Exfiltration",
+    3: "C2 / Beaconing",
+    4: "DDoS / High Volume",
 }
 
-# EDB Teal & Corporate Palette
-COLORS = ["#3DBFBF", "#1D9E75", "#D85A30", "#E8972A", "#D94040"]
+COLORS = ["#378ADD", "#1D9E75", "#D85A30", "#BA7517", "#993356"]
 
 # ─────────────────────────────────────────────
-# DATABASE HELPERS
+# 2. DATABASE HELPERS
 # ─────────────────────────────────────────────
 
 def get_connection():
     return psycopg2.connect(**DB_CONFIG)
 
 def load_cluster_points() -> pd.DataFrame:
+    """Joins MADlib kmeans results with your custom netflow_features table."""
     sql = textwrap.dedent("""
-        SELECT a.src_ip, a.cluster_id, f.flow_count, f.unique_dsts, f.unique_ports,
-               ROUND((f.total_bytes / 1e6)::numeric, 2) AS bytes_mb,
-               f.hour
-        FROM netvista_demo.kmeans_assignments a
-        JOIN netvista_demo.netflow_features f USING (src_ip)
-        LIMIT 20000
+        SELECT
+            a.pid::text as src_ip,
+            a.cluster_id,
+            f.flow_count,
+            f.unique_dsts,
+            f.unique_ports,
+            ROUND((f.total_bytes / 1e6)::numeric, 2)   AS bytes_mb,
+            f.max_bytes,
+            f.total_packets,
+            f.dst_entropy,
+            f.port_spread,
+            f.hour
+        FROM netvista_demo.kmeans_out  a
+        JOIN netvista_demo.netflow_features f ON (a.pid::text = f.src_ip::text)
+        ORDER BY a.cluster_id, f.flow_count DESC
+        LIMIT 15000
     """)
     with get_connection() as conn:
         return pd.read_sql(sql, conn)
 
 def load_cluster_summary() -> pd.DataFrame:
+    """Calculates cluster centroids based on your specific features."""
     sql = textwrap.dedent("""
-        SELECT a.cluster_id, COUNT(*) AS ip_count,
-               ROUND(AVG(f.flow_count)::numeric, 1) AS avg_flows,
-               ROUND(AVG(f.unique_dsts)::numeric, 1) AS avg_dsts,
-               ROUND(AVG(f.unique_ports)::numeric, 1) AS avg_ports,
-               ROUND((AVG(f.total_bytes)/1e6)::numeric, 2) AS avg_bytes_mb,
-               ROUND(AVG(f.dst_entropy)::numeric, 4) AS avg_entropy
-        FROM netvista_demo.kmeans_assignments a
-        JOIN netvista_demo.netflow_features f USING (src_ip)
-        GROUP BY a.cluster_id ORDER BY a.cluster_id
+        SELECT
+            a.cluster_id,
+            COUNT(*)                                          AS ip_count,
+            ROUND(AVG(f.flow_count)::numeric, 1)             AS avg_flows,
+            ROUND(AVG(f.unique_dsts)::numeric, 1)            AS avg_dsts,
+            ROUND(AVG(f.unique_ports)::numeric, 1)           AS avg_ports,
+            ROUND((AVG(f.total_bytes)/1e6)::numeric, 2)      AS avg_bytes_mb,
+            ROUND(AVG(f.dst_entropy)::numeric, 4)            AS avg_entropy,
+            ROUND(AVG(f.port_spread)::numeric, 4)            AS avg_port_spread
+        FROM netvista_demo.kmeans_out a
+        JOIN netvista_demo.netflow_features f ON (a.pid::text = f.src_ip::text)
+        GROUP BY a.cluster_id
+        ORDER BY a.cluster_id
+    """)
+    with get_connection() as conn:
+        return pd.read_sql(sql, conn)
+
+def load_top_ips(cluster_id: int, n: int = 20) -> pd.DataFrame:
+    sql = textwrap.dedent(f"""
+        SELECT
+            f.src_ip,
+            f.flow_count,
+            f.unique_dsts,
+            f.unique_ports,
+            ROUND((f.total_bytes/1e6)::numeric, 2) AS bytes_mb,
+            f.dst_entropy,
+            f.port_spread
+        FROM netvista_demo.kmeans_out a
+        JOIN netvista_demo.netflow_features f ON (a.pid::text = f.src_ip::text)
+        WHERE a.cluster_id = {cluster_id}
+        ORDER BY f.flow_count DESC
+        LIMIT {n}
     """)
     with get_connection() as conn:
         return pd.read_sql(sql, conn)
 
 # ─────────────────────────────────────────────
-# STYLE & LAYOUT (Adapted from app2.py)
+# 3. CHART BUILDERS
 # ─────────────────────────────────────────────
 
-def _chart_layout(height=350):
+def fig_scatter(df: pd.DataFrame, x_col: str, y_col: str, highlight: Optional[int]):
+    df = df.copy()
+    df["label"] = df["cluster_id"].map(CLUSTER_LABELS).fillna("Unknown")
+    
+    fig = px.scatter(
+        df, x=x_col, y=y_col,
+        color="label",
+        color_discrete_sequence=COLORS,
+        hover_data=["src_ip", "flow_count", "unique_dsts", "bytes_mb"],
+        opacity=0.7,
+        labels={x_col: x_col.replace("_", " "), y_col: y_col.replace("_", " ")},
+    )
+    fig.update_traces(marker=dict(size=7))
+    fig.update_layout(**_layout())
+    return fig
+
+def fig_centroid_radar(summary: pd.DataFrame):
+    dims = ["avg_flows", "avg_dsts", "avg_ports", "avg_bytes_mb", "avg_entropy", "avg_port_spread"]
+    dim_labels = ["Flows", "Dsts", "Ports", "Bytes(MB)", "Entropy", "Spread"]
+    
+    # Normalize 0-1 for radar chart clarity
+    norm = summary[dims].copy()
+    for c in dims:
+        mx = norm[c].max()
+        norm[c] = norm[c] / mx if mx > 0 else 0
+
+    fig = go.Figure()
+    for _, row in summary.iterrows():
+        ci = int(row["cluster_id"])
+        vals = norm.loc[row.name, dims].tolist()
+        vals += [vals[0]]
+        fig.add_trace(go.Scatterpolar(
+            r=vals, theta=dim_labels + [dim_labels[0]],
+            fill="toself",
+            name=CLUSTER_LABELS.get(ci, f"C{ci}"),
+            line_color=COLORS[ci % len(COLORS)]
+        ))
+    fig.update_layout(
+        polar=dict(radialaxis=dict(visible=True, range=[0, 1], showticklabels=False)),
+        **_layout(height=400)
+    )
+    return fig
+
+def fig_distribution(summary: pd.DataFrame):
+    df = summary.copy()
+    df["label"] = df["cluster_id"].map(CLUSTER_LABELS)
+    fig = px.bar(
+        df, x="ip_count", y="label", orientation="h",
+        color="label", color_discrete_sequence=COLORS,
+        text="ip_count"
+    )
+    fig.update_layout(showlegend=False, **_layout(height=300))
+    return fig
+
+def _layout(height=360):
     return dict(
         height=height,
         margin=dict(l=40, r=20, t=20, b=40),
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="'IBM Plex Sans', sans-serif", color="#3D3D3D", size=11),
-        xaxis=dict(gridcolor="#EEEEEE", zerolinecolor="#E5E5E5"),
-        yaxis=dict(gridcolor="#EEEEEE", zerolinecolor="#E5E5E5"),
+        plot_bgcolor="#0d1117",
+        paper_bgcolor="#0d1117",
+        font=dict(family="'JetBrains Mono', monospace", color="#c9d1d9", size=11),
+        xaxis=dict(gridcolor="#21262d"),
+        yaxis=dict(gridcolor="#21262d"),
     )
 
 # ─────────────────────────────────────────────
-# DASH APP SETUP
+# 4. DASH APP
 # ─────────────────────────────────────────────
 
-app = dash.Dash(
-    __name__,
-    external_stylesheets=[
-        dbc.themes.BOOTSTRAP,
-        "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600&family=IBM+Plex+Mono&display=swap"
-    ],
-    title="NetVista — EDB Postgres AI",
-)
+app = dash.Dash(__name__, external_stylesheets=[dbc.themes.CYBORG])
 
-# Custom Header (Matched to app2.py)
-header = html.Nav(className="nav", style={
-    "background": "#fff", "borderBottom": "1px solid #E2E2E2",
-    "borderTop": "3px solid #3DBFBF", "height": "58px",
-    "display": "flex", "alignItems": "center", "padding": "0 28px",
-    "position": "sticky", "top": "0", "zIndex": "100", "boxShadow": "0 1px 3px rgba(0,0,0,.06)"
-}, children=[
-    html.A(style={"textDecoration": "none", "marginRight": "18px", "display": "flex", "alignItems": "baseline", "gap": "4px"}, children=[
-        html.Span("EDB", style={"fontSize": "17px", "fontWeight": "800", "letterSpacing": "1px", "color": "#27A67A"}),
-        html.Span("WHPG", style={"fontSize": "17px", "fontWeight": "700", "letterSpacing": ".5px", "color": "#27A67A"}),
-    ]),
-    html.Div(style={"width": "1px", "height": "24px", "background": "#E2E2E2", "margin": "0 16px"}),
-    html.Span("K-Means Cluster Explorer", style={"fontSize": "13px", "fontWeight": "500", "color": "#555555"}),
-    html.Div(style={"flex": "1"}),
-    html.Div(id="conn-status", className="nav-pill", style={
-        "display": "flex", "alignItems": "center", "gap": "7px", "fontSize": "12px", 
-        "background": "#F5F5F5", "border": "1px solid #E2E2E2", "padding": "5px 13px", "borderRadius": "20px"
-    })
-])
+AXIS_OPTIONS = [
+    {"label": "Flow count",      "value": "flow_count"},
+    {"label": "Unique dsts",     "value": "unique_dsts"},
+    {"label": "Unique ports",    "value": "unique_ports"},
+    {"label": "Bytes (MB)",      "value": "bytes_mb"},
+    {"label": "Max Bytes",       "value": "max_bytes"},
+    {"label": "Total Packets",   "value": "total_packets"},
+    {"label": "Dst entropy",     "value": "dst_entropy"},
+    {"label": "Port spread",     "value": "port_spread"},
+]
 
-app.layout = html.Div(style={"background": "#F5F5F5", "minHeight": "100vh"}, children=[
-    header,
-    dbc.Container(className="page", style={"maxWidth": "1340px", "margin": "0 auto", "padding": "28px"}, children=[
-        
-        # Title & Description
-        html.Div(className="ph", style={"marginBottom": "26px"}, children=[
-            html.H1("AI Factory: Behavior Clustering", style={"fontSize": "21px", "fontWeight": "600"}),
-            html.P("Unsupervised anomaly detection using MADlib K-Means on NetFlow feature vectors.", 
-                   style={"fontSize": "13.5px", "color": "#555555"}),
-        ]),
-
-        # Stats Row
-        dbc.Row(id="metric-cards", style={"marginBottom": "26px"}),
-
-        # Control Bar
-        html.Div(className="abar", style={"display": "flex", "gap": "10px", "marginBottom": "24px"}, children=[
-            dbc.Button("⟳  Refresh Data", id="btn-reload", className="btn bs", 
-                       style={"background": "#fff", "color": "#1D8080", "borderColor": "#3DBFBF"}),
-            dcc.Dropdown(id="x-axis", options=[{"label": "Flows", "value": "flow_count"}, {"label": "Bytes", "value": "bytes_mb"}], 
-                         value="flow_count", clearable=False, style={"width": "180px"}),
-            dcc.Dropdown(id="y-axis", options=[{"label": "Dsts", "value": "unique_dsts"}, {"label": "Ports", "value": "unique_ports"}], 
-                         value="unique_ports", clearable=False, style={"width": "180px"}),
-        ]),
-
-        # Charts
-        dbc.Row([
-            dbc.Col(dbc.Card(className="bcard", children=[
-                dbc.CardHeader("Cluster Distribution (Scatter)", style={"fontSize": "12px", "fontWeight": "600"}),
-                dbc.CardBody(dcc.Graph(id="scatter-plot", config={"displayModeBar": False}))
-            ]), md=8),
-            dbc.Col(dbc.Card(className="bcard", children=[
-                dbc.CardHeader("Cluster Sizes", style={"fontSize": "12px", "fontWeight": "600"}),
-                dbc.CardBody(dcc.Graph(id="dist-plot", config={"displayModeBar": False}))
-            ]), md=4),
-        ]),
-
-        html.Br(),
-
-        # Heatmap & Radar
-        dbc.Row([
-            dbc.Col(dbc.Card(className="bcard", children=[
-                dbc.CardHeader("Normalised Centroid Profiles", style={"fontSize": "12px", "fontWeight": "600"}),
-                dbc.CardBody(dcc.Graph(id="radar-plot", config={"displayModeBar": False}))
-            ]), md=6),
-            dbc.Col(dbc.Card(className="bcard", children=[
-                dbc.CardHeader("Centroid Heatmap (Z-Score)", style={"fontSize": "12px", "fontWeight": "600"}),
-                dbc.CardBody(dcc.Graph(id="heatmap-plot", config={"displayModeBar": False}))
-            ]), md=6),
-        ]),
-
-        html.Br(),
-
-        # Drilldown Table
-        dbc.Card(className="bcard", children=[
-            dbc.CardHeader(style={"display": "flex", "justifyContent": "space-between", "alignItems": "center"}, children=[
-                html.Span("Cluster Forensic Drilldown", style={"fontSize": "12px", "fontWeight": "600"}),
-                dcc.Dropdown(id="drilldown-cluster", 
-                             options=[{"label": f"C{i}: {CLUSTER_LABELS[i]}", "value": i} for i in range(5)], 
-                             value=1, clearable=False, style={"width": "250px", "color": "#333"})
-            ]),
-            dbc.CardBody(html.Div(id="drilldown-content"))
-        ])
+app.layout = dbc.Container(fluid=True, children=[
+    dbc.Row(dbc.Col(html.H3("NetVista Cluster Explorer", className="py-3 text-info"))),
+    
+    dbc.Row([
+        dbc.Col([
+            html.Label("X-Axis"),
+            dcc.Dropdown(id="x-axis", options=AXIS_OPTIONS, value="flow_count", clearable=False),
+            html.Label("Y-Axis", className="mt-2"),
+            dcc.Dropdown(id="y-axis", options=AXIS_OPTIONS, value="bytes_mb", clearable=False),
+            dcc.Graph(id="scatter-plot"),
+        ], md=8),
+        dbc.Col([
+            html.Label("Cluster Distribution"),
+            dcc.Graph(id="dist-plot"),
+            html.Label("Behavioral Radar"),
+            dcc.Graph(id="radar-plot"),
+        ], md=4),
     ]),
     
-    # Stores
-    dcc.Store(id="store-points"),
-    dcc.Store(id="store-summary"),
+    dbc.Row(dbc.Col([
+        html.Hr(),
+        html.Label("IP Drilldown"),
+        dcc.Dropdown(id="drill-cluster", 
+                     options=[{"label": f"{v}", "value": k} for k,v in CLUSTER_LABELS.items()], 
+                     value=0),
+        html.Div(id="table-container", className="mt-3")
+    ])),
+    
+    dcc.Store(id="data-store")
 ])
 
 # ─────────────────────────────────────────────
-# CALLBACKS
+# 5. CALLBACKS
 # ─────────────────────────────────────────────
 
 @app.callback(
-    Output("store-points", "data"),
-    Output("store-summary", "data"),
-    Output("conn-status", "children"),
-    Input("btn-reload", "n_clicks"),
+    Output("data-store", "data"),
+    Input("x-axis", "value") # Trigger on load
 )
-def update_data(_):
-    try:
-        pts = load_cluster_points()
-        summ = load_cluster_summary()
-        status = [html.Div(className="sdot on"), html.Span(f"Connected: {len(pts):,} IPs")]
-        return pts.to_json(orient="split"), summ.to_json(orient="split"), status
-    except Exception as e:
-        return None, None, [html.Div(className="sdot err"), html.Span("Disconnected")]
-
-@app.callback(
-    Output("metric-cards", "children"),
-    Input("store-summary", "data")
-)
-def render_metrics(summ_json):
-    if not summ_json: return []
-    df = pd.read_json(summ_json, orient="split")
-    
-    def make_card(lbl, val, sub):
-        return dbc.Col(html.Div(className="sc", style={
-            "background": "#fff", "border": "1px solid #E2E2E2", "borderTop": "3px solid #3DBFBF",
-            "borderRadius": "12px", "padding": "15px 17px", "boxShadow": "0 1px 3px rgba(0,0,0,.06)"
-        }, children=[
-            html.Div(lbl, style={"fontSize": "10.5px", "fontWeight": "600", "textTransform": "uppercase", "color": "#999"}),
-            html.Div(val, style={"fontSize": "21px", "fontWeight": "700", "fontFamily": "IBM Plex Mono"}),
-            html.Div(sub, style={"fontSize": "11px", "color": "#999"})
-        ]))
-
-    return [
-        make_card("Total IPs", f"{df['ip_count'].sum():,}", "Analyzed"),
-        make_card("Top Cluster", f"C{df.loc[df['ip_count'].idxmax(), 'cluster_id']}", "Majority"),
-        make_card("Avg Flows", f"{df['avg_flows'].mean():.1f}", "Global Mean"),
-        make_card("Threat Cluster", "C1", "Reconnaissance")
-    ]
+def update_store(_):
+    pts = load_cluster_points()
+    summ = load_cluster_summary()
+    return {"pts": pts.to_json(orient="split"), "summ": summ.to_json(orient="split")}
 
 @app.callback(
     Output("scatter-plot", "figure"),
     Output("dist-plot", "figure"),
     Output("radar-plot", "figure"),
-    Output("heatmap-plot", "figure"),
-    Input("store-points", "data"),
-    Input("store-summary", "data"),
+    Input("data-store", "data"),
     Input("x-axis", "value"),
-    Input("y-axis", "value"),
+    Input("y-axis", "value")
 )
-def update_charts(pts_json, summ_json, x, y):
-    if not pts_json: return [go.Figure().update_layout(**_chart_layout())]*4
-    pts = pd.read_json(pts_json, orient="split")
-    summ = pd.read_json(summ_json, orient="split")
-    
-    # Scatter
-    pts["label"] = pts["cluster_id"].map(CLUSTER_LABELS)
-    fig_s = px.scatter(pts, x=x, y=y, color="label", color_discrete_sequence=COLORS, opacity=0.6)
-    fig_s.update_layout(**_chart_layout())
-
-    # Dist
-    fig_d = px.bar(summ, x="ip_count", y="cluster_id", orientation='h', color_discrete_sequence=[COLORS[0]])
-    fig_d.update_layout(**_chart_layout())
-
-    # Radar (Normalised)
-    fig_r = go.Figure()
-    dims = ["avg_flows", "avg_dsts", "avg_ports", "avg_bytes_mb"]
-    for i, row in summ.iterrows():
-        fig_r.add_trace(go.Scatterpolar(r=row[dims].values / row[dims].values.max(), theta=dims, fill='toself', name=f"C{int(row['cluster_id'])}", line_color=COLORS[i%5]))
-    fig_r.update_layout(**_chart_layout())
-
-    # Heatmap
-    fig_h = px.imshow(summ[dims].values, labels=dict(x="Feature", y="Cluster"), x=dims, color_continuous_scale="RdBu_r")
-    fig_h.update_layout(**_chart_layout())
-
-    return fig_s, fig_d, fig_r, fig_h
+def update_charts(data, x, y):
+    if not data: return go.Figure(), go.Figure(), go.Figure()
+    pts = pd.read_json(data["pts"], orient="split")
+    summ = pd.read_json(data["summ"], orient="split")
+    return fig_scatter(pts, x, y, None), fig_distribution(summ), fig_centroid_radar(summ)
 
 @app.callback(
-    Output("drilldown-content", "children"),
-    Input("drilldown-cluster", "value"),
-    Input("store-points", "data")
+    Output("table-container", "children"),
+    Input("drill-cluster", "value")
 )
-def render_table(cid, pts_json):
-    if not pts_json: return "No data"
-    df = pd.read_json(pts_json, orient="split")
-    filtered = df[df["cluster_id"] == cid].head(20)
+def update_table(cluster_id):
+    df = load_top_ips(cluster_id)
     return dash_table.DataTable(
-        data=filtered.to_dict('records'),
-        columns=[{"name": i, "id": i} for i in filtered.columns],
-        style_header={'backgroundColor': '#FAFAFA', 'fontWeight': 'bold', 'fontSize': '11px', 'textTransform': 'uppercase'},
-        style_cell={'fontSize': '12px', 'fontFamily': 'IBM Plex Mono', 'padding': '8px'},
-        style_table={'overflowX': 'auto'}
+        data=df.to_dict("records"),
+        columns=[{"name": i, "id": i} for i in df.columns],
+        style_header={'backgroundColor': '#161b22', 'color': 'white'},
+        style_cell={'backgroundColor': '#0d1117', 'color': '#c9d1d9'}
     )
 
 if __name__ == '__main__':
