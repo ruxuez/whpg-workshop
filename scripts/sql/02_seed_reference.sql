@@ -3,6 +3,13 @@
 -- ============================================================================
 SET search_path TO netvista_demo, public;
 
+TRUNCATE regions;
+TRUNCATE subnets;
+TRUNCATE customers;
+TRUNCATE sla_contracts;
+TRUNCATE threat_intel_feeds;
+TRUNCATE geo_ip;
+
 -- ─── Regions ────────────────────────────────────────────────────────────────
 INSERT INTO regions (region_code, region_name, timezone) VALUES
     ('US-EAST',  'US East (Virginia)',        'America/New_York'),

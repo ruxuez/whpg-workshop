@@ -12,8 +12,7 @@
 -- ============================================================================
 
 -- ─── Cleanup (idempotent) ───────────────────────────────────────────────────
-DROP SCHEMA IF EXISTS netvista_demo CASCADE;
-CREATE SCHEMA netvista_demo;
+CREATE SCHEMA IF NOT EXISTS netvista_demo;
 SET search_path TO netvista_demo, public;
 
 -- ============================================================================
