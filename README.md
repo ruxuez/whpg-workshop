@@ -54,21 +54,6 @@ docker exec -u gpadmin cdw \
 "
 ```
 
-### 4. Setup PGAA
-
-Setup with local Lakekeeper catalog:
-
-```bash
-cd ..
-python3 scripts/setup_whpg.py --local-catalog
-```
-
-Optionally, setup Delta tables from public S3:
-
-```bash
-python3 scripts/setup_whpg.py --delta-tables
-```
-
 ## Configuration Files
 
 - **docker-compose.yml**: Multi-container setup (coordinator + 2 segments)
