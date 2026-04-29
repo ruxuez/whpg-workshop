@@ -36,18 +36,39 @@ BEGIN
     RAISE NOTICE 'MADlib detected — building normalised feature table';
 
     -- Normalise the four behavioural features (z-score)
+    -- CREATE TABLE netvista_demo.netflow_features_norm AS
+    -- SELECT
+    --     src_ip,
+    --     ARRAY[
+    --         (flow_count   - (SELECT AVG(flow_count)   FROM netvista_demo.netflow_features)) /
+    --             NULLIF((SELECT STDDEV(flow_count)   FROM netvista_demo.netflow_features), 0),
+    --         (unique_dsts  - (SELECT AVG(unique_dsts)  FROM netvista_demo.netflow_features)) /
+    --             NULLIF((SELECT STDDEV(unique_dsts)  FROM netvista_demo.netflow_features), 0),
+    --         (unique_ports - (SELECT AVG(unique_ports) FROM netvista_demo.netflow_features)) /
+    --             NULLIF((SELECT STDDEV(unique_ports) FROM netvista_demo.netflow_features), 0),
+    --         (total_bytes  - (SELECT AVG(total_bytes)  FROM netvista_demo.netflow_features)) /
+    --             NULLIF((SELECT STDDEV(total_bytes)  FROM netvista_demo.netflow_features), 0)
+    --     ]::double precision[] AS features
+    -- FROM netvista_demo.netflow_features
+    -- DISTRIBUTED BY (src_ip);
+    -- Normalise the SIX behavioural features for better persona separation
     CREATE TABLE netvista_demo.netflow_features_norm AS
     SELECT
         src_ip,
         ARRAY[
-            (flow_count   - (SELECT AVG(flow_count)   FROM netvista_demo.netflow_features)) /
+            (flow_count   - (SELECT AVG(flow_count)   FROM netvista_demo.netflow_features)) / 
                 NULLIF((SELECT STDDEV(flow_count)   FROM netvista_demo.netflow_features), 0),
-            (unique_dsts  - (SELECT AVG(unique_dsts)  FROM netvista_demo.netflow_features)) /
+            (unique_dsts  - (SELECT AVG(unique_dsts)  FROM netvista_demo.netflow_features)) / 
                 NULLIF((SELECT STDDEV(unique_dsts)  FROM netvista_demo.netflow_features), 0),
-            (unique_ports - (SELECT AVG(unique_ports) FROM netvista_demo.netflow_features)) /
+            (unique_ports - (SELECT AVG(unique_ports) FROM netvista_demo.netflow_features)) / 
                 NULLIF((SELECT STDDEV(unique_ports) FROM netvista_demo.netflow_features), 0),
-            (total_bytes  - (SELECT AVG(total_bytes)  FROM netvista_demo.netflow_features)) /
-                NULLIF((SELECT STDDEV(total_bytes)  FROM netvista_demo.netflow_features), 0)
+            (total_bytes  - (SELECT AVG(total_bytes)  FROM netvista_demo.netflow_features)) / 
+                NULLIF((SELECT STDDEV(total_bytes)  FROM netvista_demo.netflow_features), 0),
+            -- NEW: Persona-identifying features
+            (dst_entropy  - (SELECT AVG(dst_entropy)  FROM netvista_demo.netflow_features)) / 
+                NULLIF((SELECT STDDEV(dst_entropy)  FROM netvista_demo.netflow_features), 0),
+            (port_spread  - (SELECT AVG(port_spread)  FROM netvista_demo.netflow_features)) / 
+                NULLIF((SELECT STDDEV(port_spread)  FROM netvista_demo.netflow_features), 0)
         ]::double precision[] AS features
     FROM netvista_demo.netflow_features
     DISTRIBUTED BY (src_ip);
@@ -125,9 +146,11 @@ BEGIN
         SELECT
             f.src_ip,
             (   ABS(f.flow_count   - s.mu_f) / NULLIF(s.sd_f, 0)
-              + ABS(f.total_bytes  - s.mu_b) / NULLIF(s.sd_b, 0)
-              + ABS(f.unique_dsts  - s.mu_d) / NULLIF(s.sd_d, 0)
-              + ABS(f.unique_ports - s.mu_p) / NULLIF(s.sd_p, 0)
+            + ABS(f.total_bytes  - s.mu_b) / NULLIF(s.sd_b, 0)
+            + ABS(f.unique_dsts  - s.mu_d) / NULLIF(s.sd_d, 0)
+            + ABS(f.unique_ports - s.mu_p) / NULLIF(s.sd_p, 0)
+            + ABS(f.dst_entropy  - s.mu_e) / NULLIF(s.sd_e, 0) -- Add mean/sd for entropy
+            + ABS(f.port_spread  - s.mu_s) / NULLIF(s.sd_s, 0) -- Add mean/sd for spread
             ) AS anomaly_score
         FROM netvista_demo.netflow_features f, stats s
     ),
