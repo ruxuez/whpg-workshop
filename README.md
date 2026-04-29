@@ -54,21 +54,6 @@ docker exec -u gpadmin cdw \
 "
 ```
 
-### 4. Setup PGAA
-
-Setup with local Lakekeeper catalog:
-
-```bash
-cd ..
-python3 scripts/setup_whpg.py --local-catalog
-```
-
-Optionally, setup Delta tables from public S3:
-
-```bash
-python3 scripts/setup_whpg.py --delta-tables
-```
-
 ## Configuration Files
 
 - **docker-compose.yml**: Multi-container setup (coordinator + 2 segments)
@@ -101,6 +86,10 @@ PGPASSWORD=changeme@123 psql -h localhost -p 5432 -U gpadmin -d demo
 - **master**: Coordinator node data directory
 - **sdw1_primary1, sdw1_primary2**: Segment 1 primary data directories
 - **sdw2_primary1, sdw2_primary2**: Segment 2 primary data directories
+
+## Assignments
+
+Check Markdown files in `Assignment` directory for labs.
 
 ## Troubleshooting
 
