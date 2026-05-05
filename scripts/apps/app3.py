@@ -295,17 +295,17 @@ FROM netvista_demo.syslog_embeddings"""
         "desc": "Top anomalous source IPs by total bytes — candidates for investigation",
         "sql": """SELECT
     src_ip::text,
-    SUM(total_bytes) AS total_bytes,
-    SUM(flow_count) AS total_flows,
-    COUNT(*) AS hourly_windows,
-    ROUND(AVG(unique_dsts), 1) AS avg_unique_dsts,
-    ROUND(AVG(unique_ports), 1) AS avg_unique_ports,
-    ROUND(AVG(dst_entropy)::numeric, 4) AS avg_entropy
-FROM netvista_demo.netflow_features
-GROUP BY src_ip
-HAVING SUM(total_bytes) > (
+    ROUND(total_bytes::numeric / 1e6, 2) AS total_bytes_mb,
+    total_flows,
+    num_hours AS active_hours,
+    ROUND(avg_unique_dsts, 1) AS avg_unique_dsts,
+    ROUND(avg_unique_ports, 1) AS avg_unique_ports,
+    ROUND(avg_dst_entropy::numeric, 4) AS avg_entropy,
+    ROUND(avg_byte_cv::numeric, 4) AS avg_byte_cv
+FROM netvista_demo.netflow_features_agg
+WHERE total_bytes > (
     SELECT AVG(total_bytes) + 2 * STDDEV_SAMP(total_bytes)
-    FROM netvista_demo.netflow_features
+    FROM netvista_demo.netflow_features_agg
 )
 ORDER BY total_bytes DESC LIMIT 20"""
     },

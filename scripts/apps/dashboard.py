@@ -50,18 +50,18 @@ def load_cluster_points() -> pd.DataFrame:
         SELECT
             a.src_ip,
             a.cluster_id,
-            f.flow_count,
-            f.unique_dsts,
-            f.unique_ports,
+            f.total_flows AS flow_count,
+            f.avg_unique_dsts AS unique_dsts,
+            f.avg_unique_ports AS unique_ports,
             ROUND((f.total_bytes / 1e6)::numeric, 2)   AS bytes_mb,
-            ROUND(f.avg_bytes::numeric, 1)              AS avg_bytes,
-            ROUND(f.dst_entropy::numeric, 4)            AS dst_entropy,
-            ROUND(f.port_spread::numeric, 4)            AS port_spread,
-            f.hour
+            ROUND((f.total_bytes / NULLIF(f.total_flows, 0))::numeric, 1) AS avg_bytes,
+            ROUND(f.avg_dst_entropy::numeric, 4)        AS dst_entropy,
+            ROUND(f.avg_port_spread::numeric, 4)        AS port_spread,
+            ROUND(f.avg_byte_cv::numeric, 4)            AS byte_cv
         FROM netvista_demo.kmeans_assignments  a
-        JOIN netvista_demo.netflow_features    f USING (src_ip)
-        ORDER BY a.cluster_id, f.flow_count DESC
-        LIMIT 20000
+        JOIN netvista_demo.netflow_features_agg f USING (src_ip)
+        ORDER BY a.cluster_id, f.total_bytes DESC
+        LIMIT 2000
     """)
     with get_connection() as conn:
         return pd.read_sql(sql, conn)
@@ -71,16 +71,23 @@ def load_cluster_summary() -> pd.DataFrame:
         SELECT
             a.cluster_id,
             COUNT(*)                                          AS ip_count,
-            ROUND(AVG(f.flow_count)::numeric, 1)             AS avg_flows,
-            ROUND(AVG(f.unique_dsts)::numeric, 1)            AS avg_dsts,
-            ROUND(AVG(f.unique_ports)::numeric, 1)           AS avg_ports,
+            ROUND(AVG(f.total_flows)::numeric, 1)            AS avg_flows,
+            ROUND(AVG(f.avg_unique_dsts)::numeric, 1)        AS avg_dsts,
+            ROUND(AVG(f.avg_unique_ports)::numeric, 1)       AS avg_ports,
             ROUND((AVG(f.total_bytes)/1e6)::numeric, 2)      AS avg_bytes_mb,
-            ROUND(AVG(f.dst_entropy)::numeric, 4)            AS avg_entropy,
-            ROUND(AVG(f.port_spread)::numeric, 4)            AS avg_port_spread
+            ROUND(AVG(f.avg_dst_entropy)::numeric, 4)        AS avg_entropy,
+            ROUND(AVG(f.avg_port_spread)::numeric, 4)        AS avg_port_spread,
+            ROUND(AVG(f.avg_byte_cv)::numeric, 4)            AS avg_byte_cv,
+            CASE
+                WHEN AVG(f.avg_unique_ports) > 1000 THEN 'RECON'
+                WHEN AVG(f.total_bytes) > 10000000000 THEN 'EXFIL'
+                WHEN AVG(f.avg_byte_cv) < 0.4 AND AVG(f.avg_dst_entropy) < 0.5 THEN 'C2'
+                ELSE 'NORMAL'
+            END AS persona
         FROM netvista_demo.kmeans_assignments a
-        JOIN netvista_demo.netflow_features   f USING (src_ip)
+        JOIN netvista_demo.netflow_features_agg f USING (src_ip)
         GROUP BY a.cluster_id
-        ORDER BY a.cluster_id
+        ORDER BY ip_count DESC
     """)
     with get_connection() as conn:
         return pd.read_sql(sql, conn)
@@ -121,6 +128,7 @@ AXIS_OPTIONS = [
     {"label": "Bytes (MB)",    "value": "bytes_mb"},
     {"label": "Dst entropy",   "value": "dst_entropy"},
     {"label": "Port spread",   "value": "port_spread"},
+    {"label": "Byte CV (variance)", "value": "byte_cv"},
 ]
 
 # Light Theme Header
