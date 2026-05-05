@@ -141,41 +141,43 @@ FROM attack_patterns GROUP BY 1 ORDER BY event_count DESC"""
     {
         "id": "b1", "panel": 1,
         "name": "B1 - Netflow Baseline Stats",
-        "desc": "Summary statistics for hourly IP behavior profiles",
+        "desc": "Summary statistics for aggregated IP behavior (all hours per IP combined)",
         "sql": """SELECT
-    COUNT(*) AS total_profiles,
-    ROUND(AVG(flow_count), 1) AS avg_flows,
-    ROUND(AVG(unique_dsts), 1) AS avg_destinations,
-    ROUND(AVG(unique_ports), 1) AS avg_ports,
-    ROUND(AVG(total_bytes)::numeric, 0) AS avg_bytes,
-    ROUND(AVG(dst_entropy)::numeric, 4) AS avg_dst_entropy,
-    ROUND(AVG(port_spread)::numeric, 4) AS avg_port_spread
-FROM netvista_demo.netflow_features"""
+    COUNT(*) AS total_ips,
+    ROUND(AVG(total_flows), 1) AS avg_total_flows,
+    ROUND(AVG(avg_unique_dsts), 1) AS avg_destinations,
+    ROUND(AVG(avg_unique_ports), 1) AS avg_ports,
+    ROUND(AVG(total_bytes)::numeric / 1e6, 2) AS avg_bytes_mb,
+    ROUND(AVG(avg_dst_entropy)::numeric, 4) AS avg_dst_entropy,
+    ROUND(AVG(avg_port_spread)::numeric, 4) AS avg_port_spread,
+    ROUND(AVG(avg_byte_cv)::numeric, 4) AS avg_byte_cv
+FROM netvista_demo.netflow_features_agg"""
     },
     {
         "id": "b2", "panel": 1,
         "name": "B2 - Z-Score Anomaly Detection",
-        "desc": "Flag IPs where 2+ features exceed 3 standard deviations",
+        "desc": "Flag IPs where 2+ features exceed 3 standard deviations (aggregated per IP)",
         "sql": """WITH stats AS (
     SELECT
-        AVG(flow_count) AS mu_flows, STDDEV_SAMP(flow_count) AS sd_flows,
-        AVG(unique_dsts) AS mu_dsts, STDDEV_SAMP(unique_dsts) AS sd_dsts,
-        AVG(unique_ports) AS mu_ports, STDDEV_SAMP(unique_ports) AS sd_ports,
+        AVG(total_flows) AS mu_flows, STDDEV_SAMP(total_flows) AS sd_flows,
+        AVG(avg_unique_dsts) AS mu_dsts, STDDEV_SAMP(avg_unique_dsts) AS sd_dsts,
+        AVG(avg_unique_ports) AS mu_ports, STDDEV_SAMP(avg_unique_ports) AS sd_ports,
         AVG(total_bytes) AS mu_bytes, STDDEV_SAMP(total_bytes) AS sd_bytes
-    FROM netvista_demo.netflow_features
+    FROM netvista_demo.netflow_features_agg
 ),
 scored AS (
     SELECT
-        f.hour, f.src_ip::text,
-        f.flow_count, f.unique_dsts, f.unique_ports, f.total_bytes,
-        ROUND(ABS(f.flow_count - s.mu_flows) / NULLIF(s.sd_flows, 0), 2) AS z_flows,
-        ROUND(ABS(f.unique_dsts - s.mu_dsts)  / NULLIF(s.sd_dsts,  0), 2) AS z_dsts,
-        ROUND(ABS(f.unique_ports - s.mu_ports) / NULLIF(s.sd_ports, 0), 2) AS z_ports,
+        f.src_ip::text,
+        f.total_flows, f.avg_unique_dsts, f.avg_unique_ports,
+        ROUND(f.total_bytes::numeric / 1e6, 2) AS total_bytes_mb,
+        ROUND(ABS(f.total_flows - s.mu_flows) / NULLIF(s.sd_flows, 0), 2) AS z_flows,
+        ROUND(ABS(f.avg_unique_dsts - s.mu_dsts)  / NULLIF(s.sd_dsts,  0), 2) AS z_dsts,
+        ROUND(ABS(f.avg_unique_ports - s.mu_ports) / NULLIF(s.sd_ports, 0), 2) AS z_ports,
         ROUND(ABS(f.total_bytes - s.mu_bytes)  / NULLIF(s.sd_bytes, 0), 2) AS z_bytes
-    FROM netvista_demo.netflow_features f, stats s
+    FROM netvista_demo.netflow_features_agg f, stats s
 )
-SELECT hour, src_ip, flow_count, unique_dsts, unique_ports,
-    total_bytes, z_flows, z_dsts, z_ports, z_bytes,
+SELECT src_ip, total_flows, avg_unique_dsts, avg_unique_ports,
+    total_bytes_mb, z_flows, z_dsts, z_ports, z_bytes,
     (CASE WHEN z_flows > 3 THEN 1 ELSE 0 END +
      CASE WHEN z_dsts  > 3 THEN 1 ELSE 0 END +
      CASE WHEN z_ports > 3 THEN 1 ELSE 0 END +
@@ -194,22 +196,21 @@ ORDER BY anomaly_dimensions DESC, z_bytes DESC LIMIT 30"""
         "sql": """SELECT
     a.cluster_id,
     COUNT(*) AS member_count,
-    ROUND(AVG(f.flow_count), 1) AS avg_flows,
-    ROUND(AVG(f.total_bytes)::numeric / 1e6, 2) AS avg_bytes_mb,
-    ROUND(AVG(f.unique_dsts), 1) AS avg_destinations,
-    ROUND(AVG(f.unique_ports), 1) AS avg_ports,
-    ROUND(AVG(f.dst_entropy)::numeric, 4) AS avg_entropy,
-    ROUND(AVG(f.port_spread)::numeric, 4) AS avg_port_spread,
-    ROUND(AVG(f.byte_cv)::numeric, 4) AS avg_byte_cv,
+    ROUND(AVG(f.total_flows), 1) AS avg_total_flows,
+    ROUND(AVG(f.total_bytes)::numeric / 1e6, 2) AS avg_total_bytes_mb,
+    ROUND(AVG(f.avg_unique_dsts), 1) AS avg_destinations,
+    ROUND(AVG(f.avg_unique_ports), 1) AS avg_ports,
+    ROUND(AVG(f.avg_dst_entropy)::numeric, 4) AS avg_entropy,
+    ROUND(AVG(f.avg_port_spread)::numeric, 4) AS avg_port_spread,
+    ROUND(AVG(f.avg_byte_cv)::numeric, 4) AS avg_byte_cv,
     CASE
-        WHEN AVG(f.unique_ports) > 100 THEN 'RECON (High Ports)'
-        WHEN AVG(f.total_bytes) > 100000000 THEN 'EXFIL (High Bytes)'
-        WHEN AVG(f.byte_cv) < 0.5 AND AVG(f.dst_entropy) < 0.3 THEN 'C2 (Beaconing)'
-        WHEN a.cluster_id = 0 THEN 'NORMAL (Baseline)'
-        ELSE 'SUSPECT (Mixed)'
+        WHEN AVG(f.avg_unique_ports) > 1000 THEN 'RECON (High Ports)'
+        WHEN AVG(f.total_bytes) > 10000000000 THEN 'EXFIL (High Bytes)'
+        WHEN AVG(f.avg_byte_cv) < 0.4 AND AVG(f.avg_dst_entropy) < 0.5 THEN 'C2 (Beaconing)'
+        ELSE 'NORMAL (Baseline)'
     END AS inferred_persona
 FROM netvista_demo.kmeans_assignments a
-JOIN netvista_demo.netflow_features f ON a.src_ip = f.src_ip
+JOIN netvista_demo.netflow_features_agg f ON a.src_ip = f.src_ip
 GROUP BY 1 ORDER BY member_count DESC"""
     },
 
@@ -221,21 +222,20 @@ GROUP BY 1 ORDER BY member_count DESC"""
         "sql": """SELECT
     a.cluster_id,
     f.src_ip::text,
-    SUM(f.flow_count) AS total_flows,
-    ROUND(SUM(f.total_bytes)::numeric / 1e6, 2) AS total_bytes_mb,
-    ROUND(AVG(f.unique_ports), 1) AS avg_ports,
-    ROUND(AVG(f.dst_entropy)::numeric, 4) AS avg_entropy,
-    ROUND(AVG(f.byte_cv)::numeric, 4) AS avg_byte_cv,
+    f.total_flows,
+    ROUND(f.total_bytes::numeric / 1e6, 2) AS total_bytes_mb,
+    ROUND(f.avg_unique_ports, 1) AS avg_ports,
+    ROUND(f.avg_dst_entropy::numeric, 4) AS avg_entropy,
+    ROUND(f.avg_byte_cv::numeric, 4) AS avg_byte_cv,
     CASE
-        WHEN AVG(f.unique_ports) > 100 THEN 'RECON'
-        WHEN SUM(f.total_bytes) > 100000000 THEN 'EXFIL'
-        WHEN AVG(f.byte_cv) < 0.5 AND AVG(f.dst_entropy) < 0.3 THEN 'C2'
+        WHEN f.avg_unique_ports > 1000 THEN 'RECON'
+        WHEN f.total_bytes > 10000000000 THEN 'EXFIL'
+        WHEN f.avg_byte_cv < 0.4 AND f.avg_dst_entropy < 0.5 THEN 'C2'
         ELSE 'NORMAL'
     END AS suspected_persona
 FROM netvista_demo.kmeans_assignments a
-JOIN netvista_demo.netflow_features f ON a.src_ip = f.src_ip
-GROUP BY 1, 2
-ORDER BY a.cluster_id, total_bytes_mb DESC
+JOIN netvista_demo.netflow_features_agg f ON a.src_ip = f.src_ip
+ORDER BY a.cluster_id, f.total_bytes DESC
 LIMIT 30"""
     },
 
