@@ -78,63 +78,44 @@ def run(sql, params=None):
 
 # ── Query definitions ────────────────────────────────────────────────────────
 QUERIES = [
-    # ── Panel 0: pgvector ────────────────────────────────────────────────────
+    # ── Panel 0: pgvector — The Power of Semantic Search ─────────────────────
     {
         "id": "a1", "panel": 0,
-        "name": "A1 - Similar to SYN Flood",
-        "desc": "pgvector cosine similarity search on syslog embeddings",
+        "name": "A1 - The Keyword Search Problem",
+        "desc": "Traditional LIKE search for 'exfiltration' finds NOTHING (proves the problem)",
         "sql": """SELECT
-    event_id, hostname, program,
-    LEFT(message, 80) AS message, severity,
-    1 - (embedding <=> (
-        SELECT embedding FROM netvista_demo.syslog_embeddings
-        WHERE message LIKE '%SYN flood%' LIMIT 1
-    )) AS similarity_score
-FROM netvista_demo.syslog_embeddings
-ORDER BY embedding <=> (
-    SELECT embedding FROM netvista_demo.syslog_embeddings
-    WHERE message LIKE '%SYN flood%' LIMIT 1
-) LIMIT 20"""
+    COUNT(*) AS total_syslogs,
+    COUNT(*) FILTER (WHERE message ILIKE '%exfil%') AS found_by_like_exfil,
+    COUNT(*) FILTER (WHERE message ILIKE '%data theft%') AS found_by_like_theft,
+    COUNT(*) FILTER (WHERE message ILIKE '%steal%') AS found_by_like_steal,
+    COUNT(*) FILTER (WHERE persona = 'exfil') AS actual_exfil_logs
+FROM netvista_demo.syslog_embeddings"""
     },
     {
         "id": "a2", "panel": 0,
-        "name": "A2 - Similar to Auth Failures",
-        "desc": "pgvector cosine similarity — find password/auth related events",
-        "sql": """SELECT
-    event_id, hostname, program,
-    LEFT(message, 80) AS message, severity,
-    1 - (embedding <=> (
-        SELECT embedding FROM netvista_demo.syslog_embeddings
-        WHERE message LIKE '%password%' LIMIT 1
-    )) AS similarity_score
-FROM netvista_demo.syslog_embeddings
-ORDER BY embedding <=> (
-    SELECT embedding FROM netvista_demo.syslog_embeddings
-    WHERE message LIKE '%password%' LIMIT 1
-) LIMIT 20"""
-    },
-    {
-        "id": "a3", "panel": 0,
-        "name": "A3 - Attack Pattern Clusters",
-        "desc": "Categorize events by attack pattern — aggregate counts & severity",
-        "sql": """WITH attack_patterns AS (
-    SELECT event_id, hostname, program,
-        LEFT(message, 60) AS msg, severity,
-        CASE
-            WHEN message LIKE '%SYN flood%' OR message LIKE '%flooding%' THEN 'DDoS'
-            WHEN message LIKE '%password%' OR message LIKE '%authenticating%' THEN 'Auth Failure'
-            WHEN message LIKE '%DOWN%' OR message LIKE '%Link down%' THEN 'Infra Down'
-            WHEN message LIKE '%OUT OF MEMORY%' OR message LIKE '%OOM%' THEN 'Resource Exhaustion'
-            WHEN message LIKE '%container%' OR message LIKE '%kubelet%' THEN 'Container Event'
-            WHEN message LIKE '%DNS%' OR message LIKE '%query rate%' THEN 'DNS Anomaly'
-            ELSE 'Other'
-        END AS pattern_category
-    FROM netvista_demo.syslog_embeddings
+        "name": "A2 - pgvector Semantic Search (The Solution)",
+        "desc": "Find exfiltration by MEANING using vector similarity — no keywords needed!",
+        "sql": """WITH query_vector AS (
+    SELECT ARRAY[
+        0.43, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,  -- data movement tools
+        0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0,  -- outbound/archive signals
+        0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0,  -- backup/upload signals
+        1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0   -- server host
+    ]::vector(32) AS vec
 )
-SELECT pattern_category, COUNT(*) AS event_count,
-    COUNT(DISTINCT hostname) AS affected_hosts,
-    ROUND(AVG(severity), 1) AS avg_severity
-FROM attack_patterns GROUP BY 1 ORDER BY event_count DESC"""
+SELECT
+    event_id,
+    hostname,
+    program,
+    LEFT(message, 100) AS message,
+    severity,
+    persona AS actual_persona,
+    ROUND((1 - (embedding <=> qv.vec))::numeric, 4) AS similarity
+FROM netvista_demo.syslog_embeddings se
+CROSS JOIN query_vector qv
+WHERE (1 - (embedding <=> qv.vec)) > 0.65
+ORDER BY embedding <=> qv.vec
+LIMIT 25"""
     },
 
     # ── Panel 1: MADlib / SQL ─────────────────────────────────────────────────
