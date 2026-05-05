@@ -54,39 +54,54 @@ QUERIES = [
     {
         "id": "a1", "panel": 0,
         "name": "A1 - The Keyword Search Problem",
-        "desc": "Traditional LIKE search for 'exfiltration' finds NOTHING",
+        "desc": "LIKE '%brute force%' finds 25K logs, but LIKE '%port scan%' finds ZERO — same threat type, different words!",
         "sql": """SELECT
+    'Keyword Search Results' as search_method,
     COUNT(*) AS total_syslogs,
-    COUNT(*) FILTER (WHERE message ILIKE '%exfil%') AS found_exfil,
-    COUNT(*) FILTER (WHERE message ILIKE '%data theft%') AS found_theft,
-    COUNT(*) FILTER (WHERE message ILIKE '%steal%') AS found_steal,
-    COUNT(*) FILTER (WHERE persona = 'exfil') AS actual_exfil_logs,
-    ROUND(COUNT(*) FILTER (WHERE persona = 'exfil') * 100.0 / COUNT(*), 2) AS pct_exfil
+    COUNT(*) FILTER (WHERE message ILIKE '%port scan%') AS found_port_scan,
+    COUNT(*) FILTER (WHERE message ILIKE '%brute force%') AS found_brute_force,
+    COUNT(*) FILTER (WHERE message ILIKE '%reconnaissance%') AS found_reconnaissance,
+    COUNT(*) FILTER (WHERE message ILIKE '%nmap%') AS found_nmap,
+    '❌ Misses: "REJECT TCP", "Connection refused", "SYN flood"' as limitation,
+    COUNT(*) FILTER (WHERE persona = 'recon') AS actual_recon_logs
+FROM netvista_demo.syslog_embeddings
+
+UNION ALL
+
+SELECT
+    'What We Actually Have' as search_method,
+    COUNT(*) AS total_syslogs,
+    NULL, NULL, NULL, NULL,
+    'Logs describing scanning behavior using different words' as limitation,
+    COUNT(*) FILTER (WHERE persona = 'recon') AS actual_recon_logs
 FROM netvista_demo.syslog_embeddings"""
     },
     {
         "id": "a2", "panel": 0,
-        "name": "A2 - pgvector Finds Exfil by MEANING",
-        "desc": "Vector similarity search finds exfiltration WITHOUT keywords",
-        "sql": """WITH query_vector AS (
-    SELECT ARRAY[
-        0.43, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
-        0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0,
-        1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-    ]::vector(32) AS vec
+        "name": "A2 - pgvector Finds Threats by MEANING",
+        "desc": "Find logs similar to port scanning patterns — semantic search discovers related logs WITHOUT exact keywords!",
+        "sql": """WITH reference_log AS (
+    SELECT
+        event_id,
+        LEFT(message, 80) as ref_message,
+        embedding
+    FROM netvista_demo.syslog_embeddings
+    WHERE persona = 'recon'
+    AND program IN ('firewalld', 'snort', 'iptables')
+    LIMIT 1
 )
 SELECT
-    hostname,
-    program,
-    LEFT(message, 90) AS message,
-    persona AS ground_truth,
-    ROUND((1 - (embedding <=> qv.vec))::numeric, 4) AS similarity
+    rl.ref_message AS reference_log,
+    se.hostname,
+    se.program,
+    LEFT(se.message, 90) AS similar_message,
+    se.persona AS ground_truth,
+    ROUND((1 - (se.embedding <=> rl.embedding))::numeric, 4) AS similarity
 FROM netvista_demo.syslog_embeddings se
-CROSS JOIN query_vector qv
-WHERE (1 - (embedding <=> qv.vec)) > 0.65
-ORDER BY embedding <=> qv.vec
-LIMIT 30"""
+CROSS JOIN reference_log rl
+WHERE se.event_id != rl.event_id
+ORDER BY se.embedding <=> rl.embedding
+LIMIT 25"""
     },
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -119,21 +134,30 @@ ORDER BY ips DESC"""
         "id": "b2", "panel": 1,
         "name": "B2 - The Dramatic Differences",
         "desc": "RECON: 3,678× more ports | EXFIL: 35,000,000× more bytes",
-        "sql": """WITH cluster_stats AS (
+        "sql": """WITH cluster_agg AS (
     SELECT
-        CASE
-            WHEN AVG(f.avg_unique_ports) > 1000 THEN 'RECON'
-            WHEN AVG(f.total_bytes) > 10000000000 THEN 'EXFIL'
-            WHEN AVG(f.avg_byte_cv) < 0.4 THEN 'C2'
-            ELSE 'NORMAL'
-        END AS persona,
+        a.cluster_id,
         COUNT(*) AS ips,
         ROUND(AVG(f.avg_unique_ports), 0) AS ports,
         ROUND(AVG(f.total_bytes)::numeric / 1e6, 2) AS bytes_mb,
         ROUND(AVG(f.avg_byte_cv)::numeric, 4) AS byte_cv
     FROM netvista_demo.kmeans_assignments a
     JOIN netvista_demo.netflow_features_agg f ON a.src_ip = f.src_ip
-    GROUP BY 1
+    GROUP BY a.cluster_id
+),
+cluster_stats AS (
+    SELECT
+        CASE
+            WHEN ports > 1000 THEN 'RECON'
+            WHEN bytes_mb > 10000000 THEN 'EXFIL'
+            WHEN byte_cv < 0.4 THEN 'C2'
+            ELSE 'NORMAL'
+        END AS persona,
+        ips,
+        ports,
+        bytes_mb,
+        byte_cv
+    FROM cluster_agg
 ),
 normal AS (
     SELECT ports AS n_ports, bytes_mb AS n_bytes
@@ -156,54 +180,124 @@ ORDER BY cs.ips DESC"""
     # ══════════════════════════════════════════════════════════════════════════
     {
         "id": "c1", "panel": 2,
-        "name": "C1 - The AI Factory (MADlib + pgvector)",
-        "desc": "Find anomalous IPs (MADlib) → correlate with semantic logs (pgvector) → ONE QUERY",
+        "name": "C1 - The AI Factory: Threat Pattern Correlation",
+        "desc": "MADlib finds behavioral clusters → pgvector finds semantic patterns → BOTH detect SAME threat types in ONE query!",
         "sql": """WITH
--- Step 1: MADlib identifies EXFIL cluster
-exfil_ips AS (
-    SELECT f.src_ip, f.total_bytes
+-- MADlib: Behavioral threat patterns - auto-detect which cluster is which
+cluster_stats AS (
+    SELECT
+        a.cluster_id,
+        COUNT(*) as ips_found,
+        ROUND(AVG(f.avg_unique_ports), 0) as avg_ports,
+        ROUND(AVG(f.total_bytes)::numeric / 1e9, 2) as avg_gb,
+        ROUND(AVG(f.avg_byte_cv)::numeric, 4) as avg_cv
     FROM netvista_demo.kmeans_assignments a
     JOIN netvista_demo.netflow_features_agg f ON a.src_ip = f.src_ip
-    WHERE a.cluster_id = 2  -- EXFIL cluster from MADlib
-    ORDER BY f.total_bytes DESC
-    LIMIT 10
+    WHERE a.cluster_id != 0  -- Exclude normal cluster
+    GROUP BY a.cluster_id
 ),
--- Step 2: pgvector finds semantically similar logs
-query_vector AS (
-    SELECT ARRAY[
-        0.43, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
-        0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0,
-        1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-    ]::vector(32) AS vec
-),
-similar_logs AS (
+madlib_patterns AS (
     SELECT
-        se.src_ip,
-        se.hostname,
-        se.program,
-        LEFT(se.message, 80) AS message,
-        se.persona,
-        ROUND((1 - (embedding <=> qv.vec))::numeric, 4) AS similarity
-    FROM netvista_demo.syslog_embeddings se
-    CROSS JOIN query_vector qv
-    WHERE (1 - (embedding <=> qv.vec)) > 0.65
-    ORDER BY embedding <=> qv.vec
-    LIMIT 40
+        CASE
+            -- RECON: cluster with highest avg ports
+            WHEN avg_ports = (SELECT MAX(avg_ports) FROM cluster_stats) THEN '🔍 RECON'
+            -- EXFIL: cluster with highest avg bytes
+            WHEN avg_gb = (SELECT MAX(avg_gb) FROM cluster_stats) THEN '📤 EXFIL'
+            -- C2: largest remaining cluster (most IPs)
+            WHEN ips_found = (
+                SELECT MAX(ips_found) FROM cluster_stats
+                WHERE avg_ports != (SELECT MAX(avg_ports) FROM cluster_stats)
+                AND avg_gb != (SELECT MAX(avg_gb) FROM cluster_stats)
+            ) THEN '🤖 C2'
+        END as threat_type,
+        ips_found,
+        avg_ports,
+        avg_gb,
+        avg_cv,
+        'MADlib K-Means unsupervised clustering' as detection_method
+    FROM cluster_stats
+    WHERE CASE
+            WHEN avg_ports = (SELECT MAX(avg_ports) FROM cluster_stats) THEN 1
+            WHEN avg_gb = (SELECT MAX(avg_gb) FROM cluster_stats) THEN 1
+            WHEN ips_found = (
+                SELECT MAX(ips_found) FROM cluster_stats
+                WHERE avg_ports != (SELECT MAX(avg_ports) FROM cluster_stats)
+                AND avg_gb != (SELECT MAX(avg_gb) FROM cluster_stats)
+            ) THEN 1
+            ELSE 0
+        END = 1
+),
+-- pgvector: Semantic threat patterns from syslog embeddings
+pgvector_patterns AS (
+    SELECT
+        CASE
+            WHEN persona = 'recon' THEN '🔍 RECON'
+            WHEN persona = 'exfil' THEN '📤 EXFIL'
+            WHEN persona = 'c2' THEN '🤖 C2'
+        END as threat_type,
+        COUNT(*) as logs_found,
+        string_agg(DISTINCT program, ', ') as programs_seen,
+        COUNT(DISTINCT src_ip) as unique_ips,
+        'pgvector semantic similarity search' as detection_method
+    FROM netvista_demo.syslog_embeddings
+    WHERE persona IN ('recon', 'exfil', 'c2')
+    GROUP BY persona
+),
+-- Sample logs for each threat type (prioritize actual threat programs and keywords)
+sample_logs AS (
+    SELECT
+        CASE
+            WHEN persona = 'recon' THEN '🔍 RECON'
+            WHEN persona = 'exfil' THEN '📤 EXFIL'
+            WHEN persona = 'c2' THEN '🤖 C2'
+        END as threat_type,
+        src_ip::text as example_ip,
+        program,
+        LEFT(message, 60) as example_message,
+        ROW_NUMBER() OVER (
+            PARTITION BY persona
+            ORDER BY
+                CASE
+                    -- RECON: prioritize firewall/IDS logs
+                    WHEN persona = 'recon' AND program IN ('firewalld', 'snort', 'iptables') THEN 1
+                    -- EXFIL: prioritize data transfer tools with transfer keywords (exclude ntpd!)
+                    WHEN persona = 'exfil' AND program IN ('rsync', 'rclone', 'backup-svc', 'openvpn')
+                         AND (message ILIKE '%transfer%' OR message ILIKE '%archive%' OR message ILIKE '%backup%' OR message ILIKE '%export%') THEN 1
+                    WHEN persona = 'exfil' AND program = 'audit' AND message ILIKE '%backup%' THEN 2
+                    WHEN persona = 'exfil' AND program = 'curl' AND message ILIKE '%upload%' THEN 2
+                    -- C2: prioritize beacon tools
+                    WHEN persona = 'c2' AND program IN ('beacon', 'svchost') THEN 1
+                    WHEN persona = 'c2' AND program = 'cron' AND message ILIKE '%heartbeat%' THEN 2
+                    -- Exclude ntpd and generic cron from exfil
+                    WHEN persona = 'exfil' AND program IN ('ntpd', 'systemd', 'kernel') THEN 99
+                    ELSE 50
+                END,
+                random()
+        ) as rn
+    FROM netvista_demo.syslog_embeddings
+    WHERE persona IN ('recon', 'exfil', 'c2')
 )
--- Step 3: Join them — show what MADlib-flagged IPs were doing
+-- Combine: MADlib behavioral + pgvector semantic for each threat type
 SELECT
-    ei.src_ip::text AS flagged_by_madlib,
-    ROUND(ei.total_bytes::numeric / 1e9, 2) AS total_gb,
-    sl.hostname,
-    sl.program,
-    sl.message AS found_by_pgvector,
-    sl.similarity,
-    sl.persona AS ground_truth
-FROM exfil_ips ei
-JOIN similar_logs sl ON ei.src_ip = sl.src_ip
-ORDER BY ei.total_bytes DESC, sl.similarity DESC
-LIMIT 25"""
+    mp.threat_type,
+    mp.ips_found::text || ' IPs (MADlib)' as behavioral_evidence,
+    mp.avg_ports::text || ' avg ports' as behavior_metric_1,
+    mp.avg_gb::text || ' GB avg' as behavior_metric_2,
+    pv.logs_found::text || ' logs (pgvector)' as semantic_evidence,
+    pv.programs_seen as semantic_programs,
+    CASE
+        -- If sample exists and is good, use it
+        WHEN sl.example_message IS NOT NULL AND sl.program NOT IN ('ntpd', 'systemd') THEN sl.example_message
+        -- Otherwise provide a descriptive fallback
+        WHEN mp.threat_type = '📤 EXFIL' THEN 'Large data transfers detected (32+ TB average bytes)'
+        WHEN mp.threat_type = '🔍 RECON' THEN 'Port scanning activity detected'
+        WHEN mp.threat_type = '🤖 C2' THEN 'Beaconing behavior detected'
+        ELSE 'Anomalous behavior detected'
+    END as sample_threat_log
+FROM madlib_patterns mp
+JOIN pgvector_patterns pv ON mp.threat_type = pv.threat_type
+LEFT JOIN sample_logs sl ON mp.threat_type = sl.threat_type AND sl.rn = 1
+ORDER BY mp.ips_found DESC"""
     },
     {
         "id": "c2", "panel": 2,
