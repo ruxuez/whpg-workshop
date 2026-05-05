@@ -87,7 +87,9 @@ FROM netvista_demo.syslog_embeddings"""
         embedding
     FROM netvista_demo.syslog_embeddings
     WHERE persona = 'recon'
+    AND event_id >= 900000  -- Prioritize our diverse manually-added logs
     AND program IN ('firewalld', 'snort', 'iptables')
+    ORDER BY event_id
     LIMIT 1
 )
 SELECT
@@ -100,8 +102,11 @@ SELECT
 FROM netvista_demo.syslog_embeddings se
 CROSS JOIN reference_log rl
 WHERE se.event_id != rl.event_id
+AND se.message NOT ILIKE '%brute force%'  -- Exclude repetitive brute force logs
+AND se.program NOT IN ('ntpd', 'systemd', 'kernel')  -- Exclude misclassified normal services
+AND se.persona = 'recon'  -- Only show recon logs for clarity
 ORDER BY se.embedding <=> rl.embedding
-LIMIT 25"""
+LIMIT 15"""
     },
 
     # ══════════════════════════════════════════════════════════════════════════
