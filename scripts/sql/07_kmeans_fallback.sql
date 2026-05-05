@@ -56,18 +56,18 @@ BEGIN
     SELECT
         src_ip,
         ARRAY[
-            (flow_count   - (SELECT AVG(flow_count)   FROM netvista_demo.netflow_features)) / 
+            (flow_count   - (SELECT AVG(flow_count)   FROM netvista_demo.netflow_features)) /
                 NULLIF((SELECT STDDEV(flow_count)   FROM netvista_demo.netflow_features), 0),
-            (unique_dsts  - (SELECT AVG(unique_dsts)  FROM netvista_demo.netflow_features)) / 
+            (unique_dsts  - (SELECT AVG(unique_dsts)  FROM netvista_demo.netflow_features)) /
                 NULLIF((SELECT STDDEV(unique_dsts)  FROM netvista_demo.netflow_features), 0),
-            (unique_ports - (SELECT AVG(unique_ports) FROM netvista_demo.netflow_features)) / 
+            (unique_ports - (SELECT AVG(unique_ports) FROM netvista_demo.netflow_features)) /
                 NULLIF((SELECT STDDEV(unique_ports) FROM netvista_demo.netflow_features), 0),
-            (total_bytes  - (SELECT AVG(total_bytes)  FROM netvista_demo.netflow_features)) / 
+            (total_bytes  - (SELECT AVG(total_bytes)  FROM netvista_demo.netflow_features)) /
                 NULLIF((SELECT STDDEV(total_bytes)  FROM netvista_demo.netflow_features), 0),
-            -- NEW: Persona-identifying features
-            (dst_entropy  - (SELECT AVG(dst_entropy)  FROM netvista_demo.netflow_features)) / 
+            -- Added for Personas
+            (dst_entropy  - (SELECT AVG(dst_entropy)  FROM netvista_demo.netflow_features)) /
                 NULLIF((SELECT STDDEV(dst_entropy)  FROM netvista_demo.netflow_features), 0),
-            (port_spread  - (SELECT AVG(port_spread)  FROM netvista_demo.netflow_features)) / 
+            (port_spread  - (SELECT AVG(port_spread)  FROM netvista_demo.netflow_features)) /
                 NULLIF((SELECT STDDEV(port_spread)  FROM netvista_demo.netflow_features), 0)
         ]::double precision[] AS features
     FROM netvista_demo.netflow_features
@@ -99,7 +99,8 @@ BEGIN
                 m.centroids[i][1],
                 m.centroids[i][2],
                 m.centroids[i][3],
-                m.centroids[i][4]
+                m.centroids[i][4],
+                m.centroids[i][5], m.centroids[i][6] -- UNPACK ALL 6
             ]::double precision[] AS centroid
         FROM model m, generate_series(1, 5) AS i
     ),
@@ -138,42 +139,52 @@ BEGIN
             AVG(flow_count)   AS mu_f,  STDDEV_SAMP(flow_count)   AS sd_f,
             AVG(total_bytes)  AS mu_b,  STDDEV_SAMP(total_bytes)  AS sd_b,
             AVG(unique_dsts)  AS mu_d,  STDDEV_SAMP(unique_dsts)  AS sd_d,
-            AVG(unique_ports) AS mu_p,  STDDEV_SAMP(unique_ports) AS sd_p
+            AVG(unique_ports) AS mu_p,  STDDEV_SAMP(unique_ports) AS sd_p,
+            AVG(dst_entropy)  AS mu_e,  STDDEV_SAMP(dst_entropy)  AS sd_e,
+            AVG(port_spread)  AS mu_s,  STDDEV_SAMP(port_spread)  AS sd_s,
+            AVG(byte_cv)      AS mu_cv, STDDEV_SAMP(byte_cv)      AS sd_cv
         FROM netvista_demo.netflow_features
     ),
     scored AS (
-        -- Composite anomaly score = sum of per-feature absolute z-scores
+        -- Persona-aware scoring: weight the features that distinguish personas
         SELECT
             f.src_ip,
-            (   ABS(f.flow_count   - s.mu_f) / NULLIF(s.sd_f, 0)
-            + ABS(f.total_bytes  - s.mu_b) / NULLIF(s.sd_b, 0)
-            + ABS(f.unique_dsts  - s.mu_d) / NULLIF(s.sd_d, 0)
-            + ABS(f.unique_ports - s.mu_p) / NULLIF(s.sd_p, 0)
-            + ABS(f.dst_entropy  - s.mu_e) / NULLIF(s.sd_e, 0) -- Add mean/sd for entropy
-            + ABS(f.port_spread  - s.mu_s) / NULLIF(s.sd_s, 0) -- Add mean/sd for spread
-            ) AS anomaly_score
+            -- Z-scores for each feature
+            ABS(f.flow_count   - s.mu_f)  / NULLIF(s.sd_f, 0)  AS z_flow,
+            ABS(f.total_bytes  - s.mu_b)  / NULLIF(s.sd_b, 0)  AS z_bytes,
+            ABS(f.unique_ports - s.mu_p)  / NULLIF(s.sd_p, 0)  AS z_ports,
+            ABS(f.dst_entropy  - s.mu_e)  / NULLIF(s.sd_e, 0)  AS z_entropy,
+            ABS(f.port_spread  - s.mu_s)  / NULLIF(s.sd_s, 0)  AS z_spread,
+            ABS(f.byte_cv      - s.mu_cv) / NULLIF(s.sd_cv, 0) AS z_cv,
+            -- Composite anomaly score
+            (   ABS(f.flow_count   - s.mu_f)  / NULLIF(s.sd_f, 0)
+            + ABS(f.total_bytes  - s.mu_b)  / NULLIF(s.sd_b, 0) * 2.0  -- weight bytes higher
+            + ABS(f.unique_ports - s.mu_p)  / NULLIF(s.sd_p, 0) * 2.0  -- weight ports higher
+            + ABS(f.dst_entropy  - s.mu_e)  / NULLIF(s.sd_e, 0)
+            + ABS(f.port_spread  - s.mu_s)  / NULLIF(s.sd_s, 0)
+            + ABS(f.byte_cv      - s.mu_cv) / NULLIF(s.sd_cv, 0)
+            ) AS anomaly_score,
+            -- Raw features for persona detection
+            f.unique_ports, f.total_bytes, f.dst_entropy, f.byte_cv
         FROM netvista_demo.netflow_features f, stats s
     ),
-    -- Compute score thresholds at 60th / 80th / 92nd / 98th percentiles
-    -- so the 5 bands mirror the size distribution of real K-Means clusters.
-    pctiles AS (
-        SELECT
-            PERCENTILE_CONT(0.60) WITHIN GROUP (ORDER BY anomaly_score) AS p60,
-            PERCENTILE_CONT(0.80) WITHIN GROUP (ORDER BY anomaly_score) AS p80,
-            PERCENTILE_CONT(0.92) WITHIN GROUP (ORDER BY anomaly_score) AS p92,
-            PERCENTILE_CONT(0.98) WITHIN GROUP (ORDER BY anomaly_score) AS p98
-        FROM scored
-    )
+    -- Persona-based clustering (rule-based for SQL fallback)
+    -- This mirrors the expected K-Means output with clear persona boundaries
     SELECT
-        sc.src_ip,
+        src_ip,
         CASE
-            WHEN sc.anomaly_score >= pt.p98 THEN 4   -- extreme outliers  (~2 %)
-            WHEN sc.anomaly_score >= pt.p92 THEN 3   -- high anomaly      (~6 %)
-            WHEN sc.anomaly_score >= pt.p80 THEN 2   -- moderate anomaly  (~12 %)
-            WHEN sc.anomaly_score >= pt.p60 THEN 1   -- slightly elevated (~20 %)
-            ELSE                                 0   -- normal behaviour  (~60 %)
+            -- RECON: high ports (z > 4) + low bytes
+            WHEN z_ports > 4 AND z_bytes < 2 AND unique_ports > 50 THEN 1
+            -- EXFIL: extreme bytes (z > 5) + low entropy
+            WHEN z_bytes > 5 AND dst_entropy < 0.2 AND total_bytes > 50000000 THEN 2
+            -- C2: low byte_cv (constant payload) + moderate flow + low entropy
+            WHEN byte_cv < 0.4 AND dst_entropy < 0.3 AND z_flow BETWEEN 0.5 AND 3 THEN 3
+            -- High anomaly but doesn't fit clear patterns
+            WHEN anomaly_score > 8 THEN 4
+            -- NORMAL: everything else
+            ELSE 0
         END AS cluster_id
-    FROM scored sc, pctiles pt
+    FROM scored
     DISTRIBUTED BY (src_ip);
 
     RAISE NOTICE 'SQL fallback clustering complete — kmeans_assignments populated';

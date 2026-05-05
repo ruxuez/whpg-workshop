@@ -57,6 +57,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE netvista_demo.syslog_embeddings (
     event_id     BIGINT,
+    src_ip       INET,
     hostname     TEXT,
     program      TEXT,
     message      TEXT,
@@ -95,101 +96,68 @@ CREATE TABLE netvista_demo.syslog_embeddings (
 --  [25] hostname like 'host-' (endpoint)
 --  [26-31] reserved / noise padding
 
-INSERT INTO netvista_demo.syslog_embeddings
-    (event_id, hostname, program, message, severity, persona, embedding)
-SELECT
-    event_id,
-    COALESCE(hostname, 'unknown'),
-    COALESCE(program, 'unknown'),
-    LEFT(message, 300),
-    severity,
-    -- Derive persona label from program + message for lab verification
-    CASE
-        WHEN program IN ('rsync','rclone','backup-svc','openvpn','curl')
-          OR message ILIKE '%outbound transfer%'
-          OR message ILIKE '%Archive exported%'
-          OR message ILIKE '%sync to cloud%'
-          OR message ILIKE '%SFTP%'
-        THEN 'exfil'
-        WHEN program IN ('beacon','svchost')
-          OR message ILIKE '%heartbeat%'
-          OR message ILIKE '%keep-alive%'
-          OR message ILIKE '%polling remote%'
-          OR message ILIKE '%C2 beacon%'
-        THEN 'c2'
-        WHEN program IN ('snort','firewalld','iptables')
-          OR message ILIKE '%port scan%'
-          OR message ILIKE '%ICMP Unreachable%'
-          OR message ILIKE '%SYN FIN%'
-          OR message ILIKE '%flood%'
-        THEN 'recon'
-        ELSE 'normal'
-    END AS persona,
-
-    ARRAY[
-        -- [0]  severity (normalized)
-        severity::float / 7.0,
-        -- [1-7] program-type indicators
-        CASE WHEN program = 'sshd'                    THEN 1.0 ELSE 0.0 END,
-        CASE WHEN program IN ('firewalld','iptables','snort') THEN 1.0 ELSE 0.0 END,
-        CASE WHEN program = 'kernel'                  THEN 1.0 ELSE 0.0 END,
-        CASE WHEN program IN ('haproxy','kubelet','systemd','ntpd') THEN 1.0 ELSE 0.0 END,
-        CASE WHEN program IN ('rsync','rclone','backup-svc','openvpn','curl','sftp') THEN 1.0 ELSE 0.0 END,
-        CASE WHEN program IN ('cron','beacon','svchost') THEN 1.0 ELSE 0.0 END,
-        CASE WHEN program = 'audit'                   THEN 1.0 ELSE 0.0 END,
-        -- [8-9] Recon signals
-        CASE WHEN message ILIKE '%scan%' OR message ILIKE '%probe%' OR message ILIKE '%flood%'
-             THEN 1.0 ELSE 0.0 END,
-        CASE WHEN message ILIKE '%nmap%' OR message ILIKE '%port scan%' OR message ILIKE '%RST flag%'
-             THEN 1.0 ELSE 0.0 END,
-        -- [10-11] Exfil signals
-        CASE WHEN message ILIKE '%outbound transfer%' OR message ILIKE '%MB in%' OR message ILIKE '%export%'
-             THEN 1.0 ELSE 0.0 END,
-        CASE WHEN message ILIKE '%encrypted tunnel%' OR message ILIKE '%sync to cloud%'
-               OR message ILIKE '%Archive%'
-             THEN 1.0 ELSE 0.0 END,
-        -- [12-13] C2 signals
-        CASE WHEN message ILIKE '%heartbeat%' OR message ILIKE '%keep-alive%' OR message ILIKE '%beacon%'
-             THEN 1.0 ELSE 0.0 END,
-        CASE WHEN message ILIKE '%polling%' OR message ILIKE '%check-in%' OR message ILIKE '%watchdog%'
-             THEN 1.0 ELSE 0.0 END,
-        -- [14] Recon: connection refused / ICMP
-        CASE WHEN message ILIKE '%Connection refused%' OR message ILIKE '%ICMP%'
-             THEN 1.0 ELSE 0.0 END,
-        -- [15] Credential harvesting
-        CASE WHEN message ILIKE '%passwd%' OR message ILIKE '%credential%' OR message ILIKE '%harvest%'
-             THEN 1.0 ELSE 0.0 END,
-        -- [16] TCP abuse
-        CASE WHEN message ILIKE '%SYN%' OR message ILIKE '%RST%' OR message ILIKE '%flood%'
-             THEN 1.0 ELSE 0.0 END,
-        -- [17] Data movement
-        CASE WHEN message ILIKE '%backup%' OR message ILIKE '%tar.gz%' OR message ILIKE '%.zip%'
-             THEN 1.0 ELSE 0.0 END,
-        -- [18] Upload / exfil endpoint
-        CASE WHEN message ILIKE '%upload%' OR message ILIKE '%POST%' OR message ILIKE '%payload%'
-             THEN 1.0 ELSE 0.0 END,
-        -- [19] Timing / interval (C2)
-        CASE WHEN message ILIKE '%interval%' OR message ILIKE '%seq=%' OR message ILIKE '%jitter%'
-             THEN 1.0 ELSE 0.0 END,
-        -- [20-22] Severity bands
-        CASE WHEN severity <= 2 THEN 1.0 ELSE 0.0 END,
-        CASE WHEN severity = 3  THEN 1.0 ELSE 0.0 END,
-        CASE WHEN severity = 4  THEN 1.0 ELSE 0.0 END,
-        -- [23-25] Host type
-        CASE WHEN hostname LIKE 'ids-%'  THEN 1.0 ELSE 0.0 END,
-        CASE WHEN hostname LIKE 'srv-%'  THEN 1.0 ELSE 0.0 END,
-        CASE WHEN hostname LIKE 'host-%' THEN 1.0 ELSE 0.0 END,
-        -- [26-31] Noise / padding (keeps vector dimensionality stable)
-        random() * 0.05,
-        random() * 0.05,
-        random() * 0.05,
-        random() * 0.05,
-        random() * 0.05,
-        random() * 0.05
-    ]::vector(32)
-FROM netvista_demo.syslog_events
-WHERE ts BETWEEN '2026-04-02' AND '2026-04-23 23:59:59'
-LIMIT 200000;   -- 200K events for the workshop
+INSERT INTO netvista_demo.syslog_embeddings 
+    (event_id, src_ip, hostname, program, message, severity, persona, embedding)
+SELECT 
+    event_id, src_ip, hostname_alias, program_alias, message, severity, persona, embedding
+FROM (
+    SELECT 
+        event_id, 
+        src_ip, 
+        COALESCE(hostname, 'unknown') AS hostname_alias, 
+        COALESCE(program, 'unknown') AS program_alias, 
+        LEFT(message, 300) AS message, 
+        severity,
+        CASE 
+            WHEN program IN ('rsync','rclone','backup-svc','openvpn','curl','audit','netfilter') 
+              OR message ILIKE '%outbound%' OR message ILIKE '%Archive%' OR message ILIKE '%sync%' 
+              OR message ILIKE '%backup%' OR message ILIKE '%upload%' 
+            THEN 'exfil'
+            WHEN program IN ('beacon','svchost','cron') 
+              OR message ILIKE '%heartbeat%' OR message ILIKE '%keep-alive%' 
+              OR message ILIKE '%polling%' OR message ILIKE '%C2%' 
+              OR message ILIKE '%beacon%'
+            THEN 'c2'
+            WHEN program IN ('snort','firewalld','iptables') 
+              OR message ILIKE '%scan%' OR message ILIKE '%probe%' 
+              OR message ILIKE '%flood%' OR message ILIKE '%nmap%'
+            THEN 'recon'
+            ELSE 'normal'
+        END AS persona,
+        ARRAY[
+            severity::float / 7.0,
+            CASE WHEN program = 'sshd' THEN 1.0 ELSE 0.0 END,
+            CASE WHEN program IN ('firewalld','iptables','snort') THEN 1.0 ELSE 0.0 END,
+            CASE WHEN program = 'kernel' THEN 1.0 ELSE 0.0 END,
+            CASE WHEN program IN ('haproxy','kubelet','systemd','ntpd') THEN 1.0 ELSE 0.0 END,
+            CASE WHEN program IN ('rsync','rclone','backup-svc','openvpn','curl','sftp') THEN 1.0 ELSE 0.0 END,
+            CASE WHEN program IN ('cron','beacon','svchost') THEN 1.0 ELSE 0.0 END,
+            CASE WHEN program = 'audit' THEN 1.0 ELSE 0.0 END,
+            CASE WHEN message ILIKE '%scan%' OR message ILIKE '%probe%' OR message ILIKE '%flood%' THEN 1.0 ELSE 0.0 END,
+            CASE WHEN message ILIKE '%nmap%' OR message ILIKE '%port scan%' OR message ILIKE '%RST flag%' THEN 1.0 ELSE 0.0 END,
+            CASE WHEN message ILIKE '%outbound transfer%' OR message ILIKE '%MB in%' OR message ILIKE '%export%' THEN 1.0 ELSE 0.0 END,
+            CASE WHEN message ILIKE '%encrypted tunnel%' OR message ILIKE '%sync to cloud%' OR message ILIKE '%Archive%' THEN 1.0 ELSE 0.0 END,
+            CASE WHEN message ILIKE '%heartbeat%' OR message ILIKE '%keep-alive%' OR message ILIKE '%beacon%' THEN 1.0 ELSE 0.0 END,
+            CASE WHEN message ILIKE '%polling%' OR message ILIKE '%check-in%' OR message ILIKE '%watchdog%' THEN 1.0 ELSE 0.0 END,
+            CASE WHEN message ILIKE '%Connection refused%' OR message ILIKE '%ICMP%' THEN 1.0 ELSE 0.0 END,
+            CASE WHEN message ILIKE '%passwd%' OR message ILIKE '%credential%' OR message ILIKE '%harvest%' THEN 1.0 ELSE 0.0 END,
+            CASE WHEN message ILIKE '%SYN%' OR message ILIKE '%RST%' OR message ILIKE '%flood%' THEN 1.0 ELSE 0.0 END,
+            CASE WHEN message ILIKE '%backup%' OR message ILIKE '%tar.gz%' OR message ILIKE '%.zip%' THEN 1.0 ELSE 0.0 END,
+            CASE WHEN message ILIKE '%upload%' OR message ILIKE '%POST%' OR message ILIKE '%payload%' THEN 1.0 ELSE 0.0 END,
+            CASE WHEN message ILIKE '%interval%' OR message ILIKE '%seq=%' OR message ILIKE '%jitter%' THEN 1.0 ELSE 0.0 END,
+            CASE WHEN severity <= 2 THEN 1.0 ELSE 0.0 END,
+            CASE WHEN severity = 3 THEN 1.0 ELSE 0.0 END,
+            CASE WHEN severity = 4 THEN 1.0 ELSE 0.0 END,
+            CASE WHEN hostname LIKE 'ids-%' THEN 1.0 ELSE 0.0 END,
+            CASE WHEN hostname LIKE 'srv-%' THEN 1.0 ELSE 0.0 END,
+            CASE WHEN hostname LIKE 'host-%' THEN 1.0 ELSE 0.0 END,
+            random()*0.05, random()*0.05, random()*0.05, random()*0.05, random()*0.05, random()*0.05
+        ]::vector(32) AS embedding
+    FROM netvista_demo.syslog_events
+    WHERE ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59'
+) sub
+WHERE persona != 'normal' OR (persona = 'normal' AND event_id % 10 = 0)
+LIMIT 200000;  -- 200K events for the workshop
 
 -- HNSW index for fast ANN search (uncomment if pgvector >= 0.5 installed)
 -- CREATE INDEX idx_syslog_embedding_hnsw
@@ -214,11 +182,13 @@ GROUP BY 1 ORDER BY 2 DESC;
 -- ═══════════════════════════════════════════════════════════════════════════════
 
 -- Step 1: Build per-IP hourly behavioral profiles
--- These four dimensions are what K-Means will cluster on:
---   flow_count   : activity volume
---   unique_ports : breadth of port access → Recon has extreme value
---   total_bytes  : transfer volume         → Exfil has extreme value
---   dst_entropy  : destination diversity   → Recon high, Exfil LOW
+-- These SIX dimensions are what K-Means will cluster on (designed for persona separation):
+--   flow_count   : activity volume          → Recon HIGH, Exfil LOW
+--   unique_ports : breadth of port access   → Recon EXTREME (100-500), Normal (5-20)
+--   total_bytes  : transfer volume          → Exfil EXTREME (100M+), Recon TINY
+--   dst_entropy  : destination diversity    → Recon HIGH (0.8+), Exfil LOW (0.05)
+--   port_spread  : port diversity ratio     → Recon HIGH, Exfil/C2 LOW
+--   byte_cv      : coefficient of variation → C2 VERY LOW (<0.3), Normal MODERATE
 
 CREATE TABLE netvista_demo.netflow_features AS
 SELECT
@@ -240,11 +210,12 @@ SELECT
     ROUND(COUNT(DISTINCT dst_port)::numeric
           / NULLIF(COUNT(*), 0), 4)                 AS port_spread,
     -- byte_cv: coefficient of variation of bytes
-    --   C2 beaconing → very LOW (constant payload)
-    --   Normal        → moderate
+    --   C2 beaconing → very LOW (constant payload < 0.3)
+    --   Normal        → moderate (0.5-2.0)
+    --   Exfil/Recon   → high variance
     ROUND(STDDEV_SAMP(bytes) / NULLIF(AVG(bytes), 0), 4) AS byte_cv
 FROM netvista_demo.netflow_logs
-WHERE ts > now() - interval '24 hours'
+WHERE ts BETWEEN '2026-04-01' AND '2026-04-23 23:59:59'
 GROUP BY 1, 2
 HAVING COUNT(*) >= 5
 DISTRIBUTED BY (src_ip);

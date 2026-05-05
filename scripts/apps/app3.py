@@ -195,14 +195,48 @@ ORDER BY anomaly_dimensions DESC, z_bytes DESC LIMIT 30"""
     a.cluster_id,
     COUNT(*) AS member_count,
     ROUND(AVG(f.flow_count), 1) AS avg_flows,
-    ROUND(AVG(f.total_bytes)::numeric, 0) AS avg_bytes,
+    ROUND(AVG(f.total_bytes)::numeric / 1e6, 2) AS avg_bytes_mb,
     ROUND(AVG(f.unique_dsts), 1) AS avg_destinations,
     ROUND(AVG(f.unique_ports), 1) AS avg_ports,
     ROUND(AVG(f.dst_entropy)::numeric, 4) AS avg_entropy,
-    ROUND(AVG(f.port_spread)::numeric, 4) AS avg_port_spread
+    ROUND(AVG(f.port_spread)::numeric, 4) AS avg_port_spread,
+    ROUND(AVG(f.byte_cv)::numeric, 4) AS avg_byte_cv,
+    CASE
+        WHEN AVG(f.unique_ports) > 100 THEN 'RECON (High Ports)'
+        WHEN AVG(f.total_bytes) > 100000000 THEN 'EXFIL (High Bytes)'
+        WHEN AVG(f.byte_cv) < 0.5 AND AVG(f.dst_entropy) < 0.3 THEN 'C2 (Beaconing)'
+        WHEN a.cluster_id = 0 THEN 'NORMAL (Baseline)'
+        ELSE 'SUSPECT (Mixed)'
+    END AS inferred_persona
 FROM netvista_demo.kmeans_assignments a
 JOIN netvista_demo.netflow_features f ON a.src_ip = f.src_ip
 GROUP BY 1 ORDER BY member_count DESC"""
+    },
+
+    # ── Panel 2: AI Factory ───────────────────────────────────────────────────
+    {
+        "id": "b4", "panel": 1,
+        "name": "B4 - Cluster Member Details (Top 30 per Cluster)",
+        "desc": "Drill down into cluster membership — see which IPs are in each cluster with their features",
+        "sql": """SELECT
+    a.cluster_id,
+    f.src_ip::text,
+    SUM(f.flow_count) AS total_flows,
+    ROUND(SUM(f.total_bytes)::numeric / 1e6, 2) AS total_bytes_mb,
+    ROUND(AVG(f.unique_ports), 1) AS avg_ports,
+    ROUND(AVG(f.dst_entropy)::numeric, 4) AS avg_entropy,
+    ROUND(AVG(f.byte_cv)::numeric, 4) AS avg_byte_cv,
+    CASE
+        WHEN AVG(f.unique_ports) > 100 THEN 'RECON'
+        WHEN SUM(f.total_bytes) > 100000000 THEN 'EXFIL'
+        WHEN AVG(f.byte_cv) < 0.5 AND AVG(f.dst_entropy) < 0.3 THEN 'C2'
+        ELSE 'NORMAL'
+    END AS suspected_persona
+FROM netvista_demo.kmeans_assignments a
+JOIN netvista_demo.netflow_features f ON a.src_ip = f.src_ip
+GROUP BY 1, 2
+ORDER BY a.cluster_id, total_bytes_mb DESC
+LIMIT 30"""
     },
 
     # ── Panel 2: AI Factory ───────────────────────────────────────────────────
